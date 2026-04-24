@@ -1,0 +1,68 @@
+# =============================================================================
+# 05-Operations — SSM, Backup, Budget Alerts, Cost Reporting
+# =============================================================================
+# Depends on: 01-organizations
+# =============================================================================
+
+# ── Budget Alerts & FinOps ───────────────────────────────────────────────────
+budget_alerts:
+  notification_topics:
+    finops:
+      name: "acme-finops-alerts"
+      display_name: "FinOps Alerts"
+      email_subscribers:
+        - "finops-team@acme.com"
+
+  budgets:
+    overall_monthly:
+      name: "acme-overall-monthly"
+      limit_amount: "10000"
+      notifications:
+        - threshold: 50
+          subscriber_sns_topic_keys:
+            - "finops"
+        - threshold: 80
+          subscriber_sns_topic_keys:
+            - "finops"
+        - threshold: 100
+          notification_type: "FORECASTED"
+          subscriber_sns_topic_keys:
+            - "finops"
+
+  anomaly_monitors:
+    service_monitor:
+      name: "acme-service-anomaly-monitor"
+
+  anomaly_subscriptions:
+    daily_alerts:
+      name: "acme-daily-anomaly-alerts"
+      frequency: "DAILY"
+      threshold_amount: 50
+      monitor_keys:
+        - "service_monitor"
+      subscribers:
+        - type: "SNS"
+          address: "finops"
+
+# ── SSM ──────────────────────────────────────────────────────────────────────
+ssm:
+  parameters: {}
+  documents: {}
+  associations: {}
+  maintenance_windows: {}
+  patch_baselines: {}
+  default_patch_baselines: {}
+
+# ── Backup ───────────────────────────────────────────────────────────────────
+backup:
+  region_settings: {}
+  vaults: {}
+  plans: {}
+  org_policy: {}
+
+# ── Cost Reporting ───────────────────────────────────────────────────────────
+cost_reporting:
+  cost_usage_reports: {}
+  anomaly_monitors: {}
+  anomaly_subscriptions: {}
+  budgets: {}

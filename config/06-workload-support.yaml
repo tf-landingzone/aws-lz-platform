@@ -1,0 +1,45 @@
+# =============================================================================
+# 06-Workload-Support — Customizations, IAM, ACM, Account Factory Trigger
+# =============================================================================
+# Depends on: 01-organizations, 03-networking (for VPC refs)
+# =============================================================================
+
+# ── Account Factory Trigger ─────────────────────────────────────────────────
+# NOTE: When using the unified landing-zone stack, trigger config is managed
+# via config/landing-zone.yaml. This section is for the split-stack approach.
+account_factory_trigger:
+  enabled: true
+  github_repo: "CloudPeer360/automates-iam-policy-deployment"
+  github_workflow_id: "account-setup.yml"
+  github_ref: "main"
+  github_token_secret_arn: "arn:aws:secretsmanager:us-east-1:111111111111:secret:github-pat-XXXXXX"  # TODO: Update with real ARN
+  notification_emails:
+    - "platform-team@acme.com"
+
+# ── IAM Resources ───────────────────────────────────────────────────────────
+iam_resources:
+  account_alias: null
+  users: {}
+  groups: {}
+  roles: {}
+  policies: {}
+  saml_providers: {}
+  instance_profiles: {}
+
+# ── Customizations ──────────────────────────────────────────────────────────
+customizations:
+  cloudformation_stacks: {}
+  cloudformation_stacksets: {}
+  service_catalog_portfolios: {}
+  application_load_balancers: {}
+  network_load_balancers: {}
+  launch_templates: {}
+  autoscaling_groups: {}
+
+# ── ACM ─────────────────────────────────────────────────────────────────────
+acm:
+  certificates: {}
+    # wildcard:
+    #   domain_name: "*.acme.com"
+    #   validation_method: "DNS"
+    #   zone_id: "Z1234567890"

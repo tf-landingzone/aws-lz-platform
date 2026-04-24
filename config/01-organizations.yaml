@@ -1,0 +1,82 @@
+# =============================================================================
+# 01-Organizations — OUs, Accounts, Governance
+# =============================================================================
+# NOTE: When using the unified landing-zone stack (stacks/landing-zone/),
+# OU and governance config is managed via config/landing-zone.yaml.
+# This file is only used when deploying stacks/01-organizations/ independently.
+# Do NOT deploy both stacks/landing-zone and stacks/01-organizations together
+# as they would create state conflicts over the same OUs.
+# =============================================================================
+
+# ── Organizations ────────────────────────────────────────────────────────────
+organizations:
+  manage_organization: false
+  feature_set: "ALL"
+
+  organizational_units:
+    security:
+      name: "Security"
+    infrastructure:
+      name: "Infrastructure"
+    workloads:
+      name: "Workloads"
+    sandbox:
+      name: "Sandbox"
+    workloads_prod:
+      name: "Production"
+      parent_key: "workloads"
+    workloads_staging:
+      name: "Staging"
+      parent_key: "workloads"
+    workloads_dev:
+      name: "Development"
+      parent_key: "workloads"
+
+  # accounts:
+  #   log_archive:
+  #     name: "log-archive"
+  #     email: "aws+log-archive@acme.com"
+  #     ou_key: "security"
+  #   audit:
+  #     name: "audit"
+  #     email: "aws+audit@acme.com"
+  #     ou_key: "security"
+  #   shared_services:
+  #     name: "shared-services"
+  #     email: "aws+shared@acme.com"
+  #     ou_key: "infrastructure"
+
+  # delegated_administrators:
+  #   "111111111111":
+  #     - "guardduty.amazonaws.com"
+  #     - "securityhub.amazonaws.com"
+
+# ── Governance ───────────────────────────────────────────────────────────────
+governance:
+  service_control_policies:
+    deny_regions:
+      name: "DenyOutsideAllowedRegions"
+      description: "Restrict to us-east-1 and us-west-2 only"
+      content_file: "policies/scp_deny_regions.json"
+      # Attach to all workload + sandbox OUs; exempts Security/Infrastructure
+      target_ou_keys:
+        - "workloads_prod"
+        - "workloads_staging"
+        - "workloads_dev"
+        - "sandbox"
+
+    deny_root:
+      name: "DenyRootAccount"
+      description: "Deny all actions by root user in member accounts"
+      content_file: "policies/scp_deny_root.json"
+      target_root: true
+
+    security_guardrails:
+      name: "SecurityGuardrails"
+      description: "Prevent disabling of security services and account operations"
+      content_file: "policies/scp_security_guardrails.json"
+      target_root: true
+
+  tag_policies: {}
+  backup_policies: {}
+  ai_services_opt_out_policies: {}

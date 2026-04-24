@@ -1,0 +1,137 @@
+# =============================================================================
+# 02-Security — Identity, Security Baseline, Compliance
+# =============================================================================
+# NOTE: When using the unified landing-zone stack, security config is managed
+# via config/landing-zone.yaml. This file is for the split-stack approach.
+# Depends on: 01-organizations (reads OU IDs via remote state)
+# =============================================================================
+
+# ── Identity Center ─────────────────────────────────────────────────────────
+identity_center:
+  group_lookups:
+    platform_admins:
+      display_name: "AWS-PlatformAdmins"
+    developers:
+      display_name: "AWS-Developers"
+    auditors:
+      display_name: "AWS-Auditors"
+    readonly:
+      display_name: "AWS-ReadOnly"
+
+  permission_sets:
+    admin:
+      name: "AdministratorAccess"
+      description: "Full admin access for platform team"
+      session_duration: "PT4H"
+      aws_managed_policies:
+        - "arn:aws:iam::aws:policy/AdministratorAccess"
+    developer:
+      name: "DeveloperAccess"
+      description: "Power user access for developers"
+      session_duration: "PT8H"
+      aws_managed_policies:
+        - "arn:aws:iam::aws:policy/PowerUserAccess"
+    readonly:
+      name: "ReadOnlyAccess"
+      description: "Audit read-only access"
+      session_duration: "PT12H"
+      aws_managed_policies:
+        - "arn:aws:iam::aws:policy/ReadOnlyAccess"
+    security_audit:
+      name: "SecurityAudit"
+      description: "Security audit access"
+      session_duration: "PT12H"
+      aws_managed_policies:
+        - "arn:aws:iam::aws:policy/SecurityAudit"
+
+  account_assignments: {}
+    # Populate after accounts are created:
+    # admin_to_mgmt:
+    #   permission_set_key: "admin"
+    #   principal_name: "platform_admins"
+    #   account_ids:
+    #     - "111111111111"
+
+  access_control_attributes: []
+
+# ── Security Baseline (Org-Level) ───────────────────────────────────────────
+security_baseline:
+  org_cloudtrail:
+    enabled: true
+    trail_name: "acme-org-trail"
+    s3_bucket_name: "acme-org-cloudtrail-logs"
+
+  config_aggregator:
+    enabled: true
+    aggregator_name: "acme-org-config-aggregator"
+    all_regions: true
+
+  guardduty_org:
+    enabled: true
+
+  securityhub_org:
+    enabled: true
+
+  enable_org_access_analyzer: true
+
+# ── Config Rules ─────────────────────────────────────────────────────────────
+config_rules:
+  config_recorder:
+    enabled: false
+  rules: {}
+  remediations: {}
+  org_rules: {}
+  conformance_packs: {}
+  # Org-wide conformance packs deployed to every member account via AWS Config.
+  # Templates live under policies/conformance-packs/. Paths are resolved
+  # relative to the stack working directory (stacks/02-security/).
+  org_conformance_packs:
+    cis-aws-foundations:
+      template_file: ../../policies/conformance-packs/cis-aws-foundations.yaml
+      excluded_accounts: []
+    nist-800-53-rev5:
+      template_file: ../../policies/conformance-packs/nist-800-53-rev5.yaml
+      excluded_accounts: []
+    pci-dss-v3-2-1:
+      template_file: ../../policies/conformance-packs/pci-dss-v3.2.1.yaml
+      excluded_accounts: []
+  aggregator:
+    enabled: false
+
+# ── Control Tower ───────────────────────────────────────────────────────────
+control_tower:
+  controls: {}
+  quarantine_scp:
+    enabled: false
+  landing_zone:
+    enabled: false
+
+# ── Inspector ───────────────────────────────────────────────────────────────
+inspector:
+  admin_account_id: null
+  resource_types:
+    - "EC2"
+    - "ECR"
+
+# ── Macie ────────────────────────────────────────────────────────────────────
+macie:
+  admin_account_id: null
+  finding_frequency: "SIX_HOURS"
+  member_accounts: {}
+  classification_jobs: {}
+  custom_data_identifiers: {}
+
+# ── Detective ────────────────────────────────────────────────────────────────
+detective:
+  admin_account_id: null
+  member_accounts: {}
+
+# ── Audit Manager ───────────────────────────────────────────────────────────
+audit_manager:
+  admin_account_id: null
+  kms_key_id: null
+  s3_bucket: null
+  s3_prefix: "audit-manager"
+  assessments: {}
+  custom_frameworks: {}
+  custom_controls: {}

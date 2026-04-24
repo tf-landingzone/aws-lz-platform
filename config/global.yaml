@@ -1,0 +1,19 @@
+# =============================================================================
+# Global Settings — Shared across all stacks
+# =============================================================================
+# Every stack reads this file for org naming, region, and common tags.
+# =============================================================================
+
+org: "acme"
+program: "lz"
+primary_region: "us-east-1"
+owner: "platform-team"
+cost_center: "CC-1234"
+extra_tags:
+  Environment: "management"
+  Compliance: "SOC2"
+
+# ── State Backend (set by 00-bootstrap) ──────────────────────────────────────
+state_backend:
+  bucket_suffix: "terraform-state"
+  dynamodb_suffix: "terraform-locks"

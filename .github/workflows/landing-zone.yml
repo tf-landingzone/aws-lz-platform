@@ -1,0 +1,254 @@
+name: Landing Zone Deploy
+
+on:
+  push:
+    paths:
+      - 'config/landing-zone.yaml'
+      - 'modules/**'
+      - 'stacks/landing-zone/**'
+    branches:
+      - main
+  pull_request:
+    paths:
+      - 'config/landing-zone.yaml'
+      - 'modules/**'
+      - 'stacks/landing-zone/**'
+  schedule:
+    # Daily 06:00 UTC drift detection — re-applies config so manual changes
+    # made via console/CLI are reverted automatically. Mirrors AWS LZA's
+    # scheduled pipeline behaviour.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action to perform"
+        required: true
+        default: "plan"
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+env:
+  TF_VERSION: "1.9.0"
+  AWS_REGION: "us-east-1"
+  WORKING_DIR: "stacks/landing-zone"
+
+concurrency:
+  group: landing-zone
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  # ── Generate tfvars from YAML config ─────────────────────────────────────
+  generate:
+    name: Generate tfvars
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate terraform.tfvars
+        run: python3 scripts/generate_landing_zone_tfvars.py
+
+      - name: Upload tfvars artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tfvars
+          path: ${{ env.WORKING_DIR }}/terraform.tfvars
+          retention-days: 1
+
+  # ── Validate Terraform ───────────────────────────────────────────────────
+  validate:
+    name: Validate
+    needs: generate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download tfvars
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tfvars
+          path: ${{ env.WORKING_DIR }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform fmt check
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform fmt -check -recursive ../../modules/
+
+      - name: Terraform Init
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform validate
+
+  # ── Plan ─────────────────────────────────────────────────────────────────
+  plan:
+    name: Plan
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'schedule' || github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download tfvars
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tfvars
+          path: ${{ env.WORKING_DIR }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_MANAGEMENT_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform init
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          terraform plan -input=false -out=tfplan -detailed-exitcode 2>&1 | tee plan_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          if [ $EXIT_CODE -eq 2 ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          elif [ $EXIT_CODE -eq 0 ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            exit $EXIT_CODE
+          fi
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('${{ env.WORKING_DIR }}/plan_output.txt', 'utf8');
+            const truncated = plan.length > 60000 ? plan.substring(0, 60000) + '\n... (truncated)' : plan;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Terraform Plan\n\`\`\`\n${truncated}\n\`\`\``
+            });
+
+      - name: Upload plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tfplan
+          path: ${{ env.WORKING_DIR }}/tfplan
+          retention-days: 1
+
+  # ── Apply ────────────────────────────────────────────────────────────────
+  apply:
+    name: Apply
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: |
+      needs.plan.outputs.has_changes == 'true' &&
+      (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'schedule') ||
+        (github.event.inputs.action == 'apply')
+      )
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download tfvars
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tfvars
+          path: ${{ env.WORKING_DIR }}
+
+      - name: Download plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tfplan
+          path: ${{ env.WORKING_DIR }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_MANAGEMENT_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform apply -input=false tfplan
+
+  # ── Notify on Failure ──────────────────────────────────────────────────
+  notify-failure:
+    name: "Notify Failure"
+    needs: [generate, validate, plan, apply]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_MANAGEMENT_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Send failure notification
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MESSAGE="Landing Zone deployment FAILED. See: ${RUN_URL}"
+
+          if [[ -n "${{ secrets.SNS_NOTIFICATION_TOPIC_ARN }}" ]]; then
+            aws sns publish \
+              --topic-arn "${{ secrets.SNS_NOTIFICATION_TOPIC_ARN }}" \
+              --subject "Landing Zone Deploy Failed" \
+              --message "${MESSAGE}"
+          fi
+
+          echo "## :x: Landing Zone Deploy Failed" >> $GITHUB_STEP_SUMMARY
+          echo "See [workflow run](${RUN_URL}) for details." >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,262 @@
+################################################################################
+# Landing Zone - Example Configuration
+################################################################################
+# Copy this file to terraform.tfvars and customize for your organization.
+# Every section is optional — only configure what you need.
+################################################################################
+
+# ── Global Settings ──────────────────────────────────────────────────────────
+
+org            = "acme"
+program        = "lz"
+primary_region = "us-east-1"
+owner          = "platform-team"
+cost_center    = "CC-1234"
+
+extra_tags = {
+  Environment = "management"
+  Compliance  = "SOC2"
+}
+
+# ── Feature Flags ────────────────────────────────────────────────────────────
+# Enable/disable entire modules — safe to start with a subset and expand later.
+
+enable_organizations     = true
+enable_governance        = true
+enable_identity_center   = true
+enable_security_baseline = true
+enable_budget_alerts     = true
+
+# ── Organizations ────────────────────────────────────────────────────────────
+
+manage_organization = false   # Set true only if Terraform should own the Organization
+
+organizational_units = {
+  security = {
+    name = "Security"
+  }
+  infrastructure = {
+    name = "Infrastructure"
+  }
+  workloads = {
+    name = "Workloads"
+  }
+  sandbox = {
+    name = "Sandbox"
+  }
+  # Nested OUs under Workloads
+  workloads_prod = {
+    name       = "Production"
+    parent_key = "workloads"
+  }
+  workloads_staging = {
+    name       = "Staging"
+    parent_key = "workloads"
+  }
+  workloads_dev = {
+    name       = "Development"
+    parent_key = "workloads"
+  }
+}
+
+# accounts = {
+#   log_archive = {
+#     name   = "log-archive"
+#     email  = "aws+log-archive@acme.com"
+#     ou_key = "security"
+#   }
+#   audit = {
+#     name   = "audit"
+#     email  = "aws+audit@acme.com"
+#     ou_key = "security"
+#   }
+#   shared_services = {
+#     name   = "shared-services"
+#     email  = "aws+shared@acme.com"
+#     ou_key = "infrastructure"
+#   }
+#   prod_app1 = {
+#     name   = "prod-app1"
+#     email  = "aws+prod-app1@acme.com"
+#     ou_key = "workloads_prod"
+#   }
+# }
+
+# delegated_administrators = {
+#   "111111111111" = [
+#     "guardduty.amazonaws.com",
+#     "securityhub.amazonaws.com",
+#     "access-analyzer.amazonaws.com",
+#   ]
+# }
+
+# ── Governance (SCPs) ───────────────────────────────────────────────────────
+
+# service_control_policies = {
+#   deny_regions = {
+#     name        = "DenyOutsideAllowedRegions"
+#     description = "Restrict to us-east-1 and us-west-2"
+#     content     = <<-JSON
+#       {
+#         "Version": "2012-10-17",
+#         "Statement": [{
+#           "Effect": "Deny",
+#           "NotAction": [
+#             "iam:*", "sts:*", "organizations:*",
+#             "support:*", "budgets:*", "billing:*"
+#           ],
+#           "Resource": "*",
+#           "Condition": {
+#             "StringNotEquals": {
+#               "aws:RequestedRegion": ["us-east-1", "us-west-2"]
+#             }
+#           }
+#         }]
+#       }
+#     JSON
+#     target_ids = ["ou-xxxx-workloads"]  # Replace with actual OU ID
+#   }
+#
+#   deny_root = {
+#     name         = "DenyRootAccount"
+#     description  = "Deny root user actions in member accounts"
+#     content_file = "../../policies/deny_root.json"
+#     target_ids   = ["ou-xxxx-workloads", "ou-xxxx-sandbox"]
+#   }
+# }
+
+# ── Identity Center ─────────────────────────────────────────────────────────
+
+# group_lookups = {
+#   platform_admins = {
+#     display_name = "AWS-PlatformAdmins"
+#   }
+#   developers = {
+#     display_name = "AWS-Developers"
+#   }
+#   auditors = {
+#     display_name = "AWS-Auditors"
+#   }
+# }
+
+# permission_sets = {
+#   admin = {
+#     name             = "AdministratorAccess"
+#     description      = "Full admin access"
+#     session_duration = "PT4H"
+#     aws_managed_policies = ["arn:aws:iam::aws:policy/AdministratorAccess"]
+#   }
+#   developer = {
+#     name             = "DeveloperAccess"
+#     description      = "Developer with guardrails"
+#     session_duration = "PT8H"
+#     aws_managed_policies = [
+#       "arn:aws:iam::aws:policy/PowerUserAccess",
+#     ]
+#     customer_managed_policies = [{
+#       name = "DenyProductionResources"
+#     }]
+#   }
+#   readonly = {
+#     name             = "ReadOnlyAccess"
+#     description      = "Audit read-only access"
+#     session_duration = "PT12H"
+#     aws_managed_policies = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
+#   }
+# }
+
+# account_assignments = {
+#   admin_to_mgmt = {
+#     permission_set_key = "admin"
+#     principal_name     = "platform_admins"
+#     account_ids        = ["111111111111"]
+#   }
+#   developer_to_dev = {
+#     permission_set_key = "developer"
+#     principal_name     = "developers"
+#     account_ids        = ["222222222222", "333333333333"]
+#   }
+#   auditor_to_all = {
+#     permission_set_key = "readonly"
+#     principal_name     = "auditors"
+#     account_ids        = ["111111111111", "222222222222", "333333333333", "444444444444"]
+#   }
+# }
+
+# ── Security Baseline (Org-Level) ───────────────────────────────────────────
+
+# org_cloudtrail = {
+#   enabled        = true
+#   name           = "acme-org-trail"
+#   s3_bucket_name = "acme-org-cloudtrail-logs"
+# }
+
+# config_aggregator = {
+#   enabled = true
+#   name    = "acme-org-aggregator"
+# }
+
+# guardduty_org = {
+#   enabled = true
+# }
+
+# securityhub_org = {
+#   enabled     = true
+#   standards_arns = [
+#     "arn:aws:securityhub:::ruleset/cis-aws-foundations-benchmark/v/1.4.0",
+#     "arn:aws:securityhub:us-east-1::standards/aws-foundational-security-best-practices/v/1.0.0",
+#   ]
+# }
+
+# enable_org_access_analyzer = true
+
+# ── Budget Alerts & FinOps ───────────────────────────────────────────────────
+
+notification_topics = {
+  finops = {
+    name              = "acme-finops-alerts"
+    display_name      = "FinOps Alerts"
+    email_subscribers = ["finops-team@acme.com"]
+  }
+}
+
+budgets = {
+  overall_monthly = {
+    name         = "acme-overall-monthly"
+    limit_amount = "10000"
+    notifications = [
+      {
+        threshold                 = 50
+        subscriber_sns_topic_keys = ["finops"]
+      },
+      {
+        threshold                 = 80
+        subscriber_sns_topic_keys = ["finops"]
+      },
+      {
+        threshold                  = 100
+        notification_type          = "FORECASTED"
+        subscriber_sns_topic_keys  = ["finops"]
+      },
+    ]
+  }
+}
+
+anomaly_monitors = {
+  service_monitor = {
+    name = "acme-service-anomaly-monitor"
+  }
+}
+
+anomaly_subscriptions = {
+  daily_alerts = {
+    name             = "acme-daily-anomaly-alerts"
+    frequency        = "DAILY"
+    threshold_amount = 50
+    monitor_keys     = ["service_monitor"]
+    subscribers = [{
+      type    = "SNS"
+      address = "finops"
+    }]
+  }
+}

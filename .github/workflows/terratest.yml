@@ -1,0 +1,130 @@
+# =============================================================================
+# Terratest — Real-AWS integration tests (opt-in)
+# =============================================================================
+# Triggers:
+#   - workflow_dispatch: manual run with optional test selector
+#   - schedule: weekly on Sunday 04:00 UTC (sandbox guardrail)
+#
+# Requires repo secrets:
+#   - TERRATEST_AWS_ROLE_ARN  (OIDC role in the SANDBOX account, NOT prod mgmt)
+#   - TERRATEST_AWS_REGION    (optional, defaults to us-east-1)
+#
+# This workflow MUST point at a sandbox AWS account. Bootstrap test creates
+# real S3 buckets + DynamoDB table, then destroys them. Cost per run < $0.05.
+# =============================================================================
+
+name: Terratest (sandbox)
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_selector:
+        description: "Go test -run pattern (default all)"
+        required: false
+        type: string
+        default: ""
+      keep_resources:
+        description: "Skip terraform destroy (for debugging)"
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 4 * * 0'  # Sun 04:00 UTC
+
+concurrency:
+  group: terratest
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terratest:
+    name: Terratest
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Go
+        uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: test/go.sum
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: "~> 1.9"
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (OIDC, SANDBOX)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.TERRATEST_AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.TERRATEST_AWS_REGION || 'us-east-1' }}
+
+      - name: Confirm sandbox account (safety check)
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          echo "Running against AWS account: $ACCOUNT"
+          if [[ -n "${{ secrets.PROD_MANAGEMENT_ACCOUNT_ID }}" && "$ACCOUNT" == "${{ secrets.PROD_MANAGEMENT_ACCOUNT_ID }}" ]]; then
+            echo "::error::Refusing to run Terratest against the production management account."
+            exit 1
+          fi
+
+      - name: Download Go modules
+        working-directory: test
+        run: go mod download
+
+      - name: Run Terratest
+        working-directory: test
+        env:
+          RUN_TERRATEST: "1"
+          TERRATEST_DESTROY: ${{ inputs.keep_resources && '0' || '1' }}
+          TERRATEST_AWS_REGION: ${{ secrets.TERRATEST_AWS_REGION || 'us-east-1' }}
+        run: |
+          set -euo pipefail
+          ARGS=(-v -timeout 40m ./...)
+          if [[ -n "${{ inputs.test_selector }}" ]]; then
+            ARGS=(-v -timeout 40m -run "${{ inputs.test_selector }}" ./...)
+          fi
+          go test "${ARGS[@]}"
+
+      - name: Upload Terraform logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: terratest-logs
+          path: |
+            test/**/.terraform/
+            test/**/terraform.tfstate*
+          retention-days: 7
+
+  notify-failure:
+    name: Notify on failure
+    needs: terratest
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Publish to SNS
+        env:
+          TOPIC_ARN: ${{ secrets.OPS_NOTIFICATION_TOPIC_ARN }}
+        run: |
+          if [[ -z "${TOPIC_ARN:-}" ]]; then
+            echo "OPS_NOTIFICATION_TOPIC_ARN not set; skipping SNS publish."
+            exit 0
+          fi
+          aws sns publish \
+            --topic-arn "$TOPIC_ARN" \
+            --subject "[LZ] Weekly Terratest failed" \
+            --message "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

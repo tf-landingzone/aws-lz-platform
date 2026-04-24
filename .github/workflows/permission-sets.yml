@@ -1,0 +1,151 @@
+# =============================================================================
+# Permission Sets Pipeline — one-time or when permission sets change
+# =============================================================================
+# Creates SSO permission sets and attaches customer-managed policy references.
+# Run this BEFORE running account-setup for the first time.
+# =============================================================================
+
+name: Permission Sets
+
+on:
+  push:
+    paths:
+      - "stacks/permission-sets/**"
+    branches: [main]
+  pull_request:
+    paths:
+      - "stacks/permission-sets/**"
+  workflow_dispatch:
+
+concurrency:
+  group: permission-sets
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_DIR: stacks/permission-sets
+  AWS_REGION: us-east-1
+
+jobs:
+  plan:
+    name: Plan Permission Sets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init
+
+      - name: Terraform Validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform plan -out=tfplan -detailed-exitcode 2>&1 | tee plan_output.txt || EXIT_CODE=$?
+          if [[ "${EXIT_CODE:-0}" == "2" ]]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload plan artifact
+        if: steps.plan.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_DIR }}/tfplan
+          retention-days: 1
+
+  apply:
+    name: Apply Permission Sets
+    needs: plan
+    if: >
+      needs.plan.outputs.has_changes == 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_DIR }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -auto-approve tfplan
+
+  # ── Notify on Failure ──────────────────────────────────────────────────
+  notify-failure:
+    name: "Notify Failure"
+    needs: [plan, apply]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Send failure notification
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MESSAGE="Permission Sets deployment FAILED. See: ${RUN_URL}"
+
+          if [[ -n "${{ secrets.SNS_NOTIFICATION_TOPIC_ARN }}" ]]; then
+            aws sns publish \
+              --topic-arn "${{ secrets.SNS_NOTIFICATION_TOPIC_ARN }}" \
+              --subject "Permission Sets Deploy Failed" \
+              --message "${MESSAGE}"
+          fi
+
+          echo "## :x: Permission Sets Deploy Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Run URL | [View Run](${RUN_URL}) |" >> $GITHUB_STEP_SUMMARY

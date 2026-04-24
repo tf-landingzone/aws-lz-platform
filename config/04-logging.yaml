@@ -1,0 +1,41 @@
+# =============================================================================
+# 04-Logging — Centralized Logging, KMS
+# =============================================================================
+# Depends on: 01-organizations
+# =============================================================================
+
+# ── Centralized Logging ─────────────────────────────────────────────────────
+centralized_logging:
+  central_log_bucket:
+    enabled: true
+    bucket_name: "acme-central-logs"
+    # kms_key_arn: "arn:aws:kms:us-east-1:111111111111:key/xxxx"
+    versioning: true
+    force_destroy: false
+    lifecycle_rules: []
+    allowed_account_ids: []
+  access_log_bucket:
+    enabled: true
+    bucket_name: "acme-access-logs"
+  cloudwatch_to_s3:
+    enabled: false
+    # firehose_name: "cloudwatch-to-s3"
+    # s3_prefix: "cloudwatch/"
+  session_manager_logging:
+    enabled: false
+    # s3_bucket_name: "acme-central-logs"
+    # s3_key_prefix: "session-logs/"
+    # cloudwatch_log_group: "/aws/ssm/session-manager"
+
+# ── KMS ──────────────────────────────────────────────────────────────────────
+kms:
+  keys: {}
+    # platform_key:
+    #   description: "Platform-wide encryption key"
+    #   enable_key_rotation: true
+    #   aliases:
+    #     - "alias/platform"
+    # logging_key:
+    #   description: "Central logging encryption key"
+    #   aliases:
+    #     - "alias/logging"

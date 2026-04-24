@@ -1,0 +1,63 @@
+# =============================================================================
+# Permission Sets — example tfvars
+# =============================================================================
+# Each permission set references customer-managed policies BY NAME.
+# The actual IAM policies are pushed into each target account by the
+# account-setup pipeline. SSO resolves the name at sign-in time.
+# =============================================================================
+
+permission_sets = {
+
+  # ── Production ─────────────────────────────────────────────────────────────
+  prod_access = {
+    name             = "ProdAccess"
+    description      = "Production account access with guardrails"
+    session_duration = "PT2H"
+    customer_managed_policies = [
+      { name = "ProdRestrictedAdmin" },
+      { name = "ViewerAccess-Custom" },
+    ]
+  }
+
+  # ── Development ────────────────────────────────────────────────────────────
+  dev_access = {
+    name             = "DevAccess"
+    description      = "Developer sandbox access"
+    session_duration = "PT4H"
+    customer_managed_policies = [
+      { name = "DevSandboxAccess" },
+      { name = "ViewerAccess-Custom" },
+    ]
+  }
+
+  # ── Staging ────────────────────────────────────────────────────────────────
+  staging_access = {
+    name             = "StagingAccess"
+    description      = "Staging account access"
+    session_duration = "PT4H"
+    customer_managed_policies = [
+      { name = "ProdRestrictedAdmin" },
+    ]
+  }
+
+  # ── Security ───────────────────────────────────────────────────────────────
+  security_access = {
+    name             = "SecurityAccess"
+    description      = "Security team full access"
+    session_duration = "PT4H"
+    customer_managed_policies = [
+      { name = "AdminAccess-Custom" },
+      { name = "ViewerAccess-Custom" },
+    ]
+  }
+
+  # ── Viewer (default) ──────────────────────────────────────────────────────
+  viewer_access = {
+    name             = "ViewerAccess"
+    description      = "Read-only access"
+    session_duration = "PT1H"
+    customer_managed_policies = [
+      { name = "ViewerAccess-Custom" },
+    ]
+  }
+}

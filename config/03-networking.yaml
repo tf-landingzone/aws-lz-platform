@@ -1,0 +1,130 @@
+# =============================================================================
+# 03-Networking — VPCs, TGW, VPN, DX, Firewall, DNS, IPAM, RAM
+# =============================================================================
+# Depends on: 01-organizations (reads OU IDs for RAM sharing)
+# This stack creates shared networking and shares via AWS RAM.
+# =============================================================================
+
+# ── Core Networking ──────────────────────────────────────────────────────────
+networking:
+  delete_default_vpcs: false
+  ipam: {}
+  dhcp_options_sets: {}
+  prefix_lists: {}
+
+  vpcs: {}
+    # shared_services:
+    #   name: "shared-services-vpc"
+    #   cidr_block: "10.0.0.0/16"
+    #   enable_dns_support: true
+    #   enable_dns_hostnames: true
+    #   subnets:
+    #     public_a:
+    #       name: "public-a"
+    #       cidr_block: "10.0.1.0/24"
+    #       availability_zone: "us-east-1a"
+    #       map_public_ip_on_launch: true
+    #       route_table_key: "public"
+    #     private_a:
+    #       name: "private-a"
+    #       cidr_block: "10.0.10.0/24"
+    #       availability_zone: "us-east-1a"
+    #       route_table_key: "private"
+    #   route_tables:
+    #     public:
+    #       routes:
+    #         igw:
+    #           cidr_block: "0.0.0.0/0"
+    #           gateway_id_from: "igw"
+    #     private: {}
+    #   internet_gateway: true
+    #   nat_gateways:
+    #     az_a:
+    #       subnet_key: "public_a"
+    #   security_groups: {}
+    #   nacls: {}
+    #   gateway_endpoints: {}
+    #   interface_endpoints: {}
+    #   flow_log:
+    #     enabled: false
+
+  vpc_peering: {}
+
+  transit_gateways: {}
+    # main:
+    #   description: "Main transit gateway"
+    #   amazon_side_asn: 64512
+    #   auto_accept_shared_attachments: "enable"
+    #   route_tables:
+    #     default: {}
+
+  transit_gateway_peering: {}
+  customer_gateways: {}
+  vpn_connections: {}
+  dx_gateways: {}
+  network_firewalls: {}
+  # ── Reference: Centralised Inspection VPC + AWS Network Firewall ──────────
+  # Uncomment and adapt CIDR/region/AZ values to your org. Pair with the
+  # `inspection_vpc` example under `vpcs:` above. All egress traffic is
+  # routed through this firewall via TGW for deep packet inspection and
+  # threat intel rule enforcement.
+  #
+  # inspection:
+  #   vpc_key: "inspection_vpc"
+  #   subnet_keys:
+  #     - "fw_a"
+  #     - "fw_b"
+  #   delete_protection: true
+  #   firewall_policy_change_protection: true
+  #   subnet_change_protection: true
+  #   logging:
+  #     flow:
+  #       log_destination_type: "S3"
+  #       log_destination:
+  #         bucketName: "acme-lz-nfw-logs"
+  #         prefix: "flow"
+  #     alert:
+  #       log_destination_type: "S3"
+  #       log_destination:
+  #         bucketName: "acme-lz-nfw-logs"
+  #         prefix: "alert"
+  #   stateful_rule_groups:
+  #     # Managed AWS threat-intel domain blocklist
+  #     aws_managed_threat_signatures:
+  #       capacity: 100
+  #       rules_source:
+  #         rules_source_list:
+  #           generated_rules_type: "DENYLIST"
+  #           target_types: ["HTTP_HOST", "TLS_SNI"]
+  #           targets:
+  #             - "evil.example.com"
+  #     # Suricata rule example — block known malware C2 ports
+  #     suricata_block_c2:
+  #       capacity: 100
+  #       rules_source:
+  #         rules_string: |
+  #           drop tcp any any -> any 6667 (msg:"IRC C2 blocked"; sid:1000001; rev:1;)
+  #   stateless_rule_groups: {}
+  #   stateful_default_actions: ["aws:drop_strict"]
+  #   stateless_default_actions: ["aws:forward_to_sfe"]
+  #   stateless_fragment_default_actions: ["aws:forward_to_sfe"]
+  gateway_load_balancers: {}
+  route53_resolver: {}
+
+# ── AWS RAM Sharing ──────────────────────────────────────────────────────────
+# Share networking resources (VPCs, TGWs, Subnets, Prefix Lists) with
+# workload accounts via AWS Resource Access Manager.
+ram_shares: {}
+  # shared_networking:
+  #   name: "shared-networking"
+  #   allow_external_principals: false
+  #   # Share with specific OUs or accounts
+  #   principals:
+  #     - "arn:aws:organizations::111111111111:ou/o-xxxx/ou-xxxx-workloads"
+  #   # Resources to share (use resource_type + resource_keys)
+  #   resource_arns: []
+  #   # Or share specific subnets by key
+  #   shared_subnet_keys:
+  #     - "shared_services/private_a"
+  #   shared_tgw_keys:
+  #     - "main"

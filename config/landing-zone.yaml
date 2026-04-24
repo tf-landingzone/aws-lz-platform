@@ -1,0 +1,530 @@
+# =============================================================================
+# Landing Zone Configuration — Single Source of Truth
+# =============================================================================
+# This YAML config drives the entire landing zone automation.
+# Run:  python3 generate_landing_zone_tfvars.py
+# It reads this file and produces stacks/landing-zone/terraform.tfvars.json
+# =============================================================================
+
+# ── Global Settings ──────────────────────────────────────────────────────────
+global:
+  org: "acme"
+  program: "lz"
+  primary_region: "us-east-1"
+  owner: "platform-team"
+  cost_center: "CC-1234"
+  extra_tags:
+    Environment: "management"
+    Compliance: "SOC2"
+
+# ── Feature Flags ────────────────────────────────────────────────────────────
+features:
+  organizations: true
+  governance: true
+  identity_center: true
+  security_baseline: true
+  account_baselines: false
+  budget_alerts: true
+  account_factory_trigger: true
+  networking: false
+  centralized_logging: true
+  config_rules: false
+  kms: false
+  macie: false
+  detective: false
+  audit_manager: false
+  iam_resources: false
+  customizations: false
+  control_tower: false
+  ssm: false
+  backup: false
+  cost_reporting: false
+
+# ── Organizations ────────────────────────────────────────────────────────────
+organizations:
+  manage_organization: false
+  feature_set: "ALL"
+
+  organizational_units:
+    security:
+      name: "Security"
+    infrastructure:
+      name: "Infrastructure"
+    workloads:
+      name: "Workloads"
+    sandbox:
+      name: "Sandbox"
+    workloads_prod:
+      name: "Production"
+      parent_key: "workloads"
+    workloads_staging:
+      name: "Staging"
+      parent_key: "workloads"
+    workloads_dev:
+      name: "Development"
+      parent_key: "workloads"
+
+  # accounts:
+  #   log_archive:
+  #     name: "log-archive"
+  #     email: "aws+log-archive@acme.com"
+  #     ou_key: "security"
+  #   audit:
+  #     name: "audit"
+  #     email: "aws+audit@acme.com"
+  #     ou_key: "security"
+  #   shared_services:
+  #     name: "shared-services"
+  #     email: "aws+shared@acme.com"
+  #     ou_key: "infrastructure"
+
+  # delegated_administrators:
+  #   "111111111111":
+  #     - "guardduty.amazonaws.com"
+  #     - "securityhub.amazonaws.com"
+
+# ── Governance ───────────────────────────────────────────────────────────────
+governance:
+  service_control_policies:
+    deny_regions:
+      name: "DenyOutsideAllowedRegions"
+      description: "Restrict to us-east-1 and us-west-2 only"
+      content_file: "policies/scp_deny_regions.json"
+      # Attach to all workload + sandbox OUs; exempts Security/Infrastructure
+      target_ou_keys:
+        - "workloads_prod"
+        - "workloads_staging"
+        - "workloads_dev"
+        - "sandbox"
+
+    deny_root:
+      name: "DenyRootAccount"
+      description: "Deny all actions by root user in member accounts"
+      content_file: "policies/scp_deny_root.json"
+      target_root: true
+
+    security_guardrails:
+      name: "SecurityGuardrails"
+      description: "Prevent disabling of security services and account operations"
+      content_file: "policies/scp_security_guardrails.json"
+      target_root: true
+
+  tag_policies: {}
+  backup_policies: {}
+  ai_services_opt_out_policies: {}
+
+# ── Identity Center ─────────────────────────────────────────────────────────
+identity_center:
+  group_lookups:
+    platform_admins:
+      display_name: "AWS-PlatformAdmins"
+    developers:
+      display_name: "AWS-Developers"
+    auditors:
+      display_name: "AWS-Auditors"
+    readonly:
+      display_name: "AWS-ReadOnly"
+
+  permission_sets:
+    admin:
+      name: "AdministratorAccess"
+      description: "Full admin access for platform team"
+      session_duration: "PT4H"
+      aws_managed_policies:
+        - "arn:aws:iam::aws:policy/AdministratorAccess"
+    developer:
+      name: "DeveloperAccess"
+      description: "Power user access for developers"
+      session_duration: "PT8H"
+      aws_managed_policies:
+        - "arn:aws:iam::aws:policy/PowerUserAccess"
+    readonly:
+      name: "ReadOnlyAccess"
+      description: "Audit read-only access"
+      session_duration: "PT12H"
+      aws_managed_policies:
+        - "arn:aws:iam::aws:policy/ReadOnlyAccess"
+    security_audit:
+      name: "SecurityAudit"
+      description: "Security audit access"
+      session_duration: "PT12H"
+      aws_managed_policies:
+        - "arn:aws:iam::aws:policy/SecurityAudit"
+
+  account_assignments: {}
+    # Populate after accounts are created with real account IDs:
+    # admin_to_mgmt:
+    #   permission_set_key: "admin"
+    #   principal_name: "platform_admins"
+    #   account_ids:
+    #     - "111111111111"
+
+  access_control_attributes: []
+
+# ── Security Baseline (Org-Level) ───────────────────────────────────────────
+security_baseline:
+  org_cloudtrail:
+    enabled: true
+    trail_name: "acme-org-trail"
+    s3_bucket_name: "acme-org-cloudtrail-logs"
+
+  config_aggregator:
+    enabled: true
+    aggregator_name: "acme-org-config-aggregator"
+    all_regions: true
+
+  guardduty_org:
+    enabled: true
+
+  securityhub_org:
+    enabled: true
+
+  enable_org_access_analyzer: true
+  org_access_analyzer_name: "acme-org-access-analyzer"
+
+# ── Budget Alerts & FinOps ───────────────────────────────────────────────────
+budget_alerts:
+  notification_topics:
+    finops:
+      name: "acme-finops-alerts"
+      display_name: "FinOps Alerts"
+      email_subscribers:
+        - "finops-team@acme.com"
+
+  budgets:
+    overall_monthly:
+      name: "acme-overall-monthly"
+      limit_amount: "10000"
+      notifications:
+        - threshold: 50
+          subscriber_sns_topic_keys:
+            - "finops"
+        - threshold: 80
+          subscriber_sns_topic_keys:
+            - "finops"
+        - threshold: 100
+          notification_type: "FORECASTED"
+          subscriber_sns_topic_keys:
+            - "finops"
+
+  anomaly_monitors:
+    service_monitor:
+      name: "acme-service-anomaly-monitor"
+
+  anomaly_subscriptions:
+    daily_alerts:
+      name: "acme-daily-anomaly-alerts"
+      frequency: "DAILY"
+      threshold_amount: 50
+      monitor_keys:
+        - "service_monitor"
+      subscribers:
+        - type: "SNS"
+          address: "finops"
+
+# ── Account Factory Trigger ─────────────────────────────────────────────────
+# Automatically triggers account-setup pipeline when Control Tower creates
+# a new account. EventBridge → Lambda → GitHub Actions workflow_dispatch.
+account_factory_trigger:
+  enabled: true
+  github_repo: "CloudPeer360/automates-iam-policy-deployment"
+  github_workflow_id: "account-setup.yml"
+  github_ref: "main"
+  github_token_secret_arn: "arn:aws:secretsmanager:us-east-1:111111111111:secret:github-pat-XXXXXX"  # TODO: Update with real ARN
+  notification_emails:
+    - "platform-team@acme.com"
+  skip_account_names:
+    - "log-archive"
+    - "audit"
+    - "shared-services"
+  #   - "platform-team@acme.com"
+
+# ── Networking ───────────────────────────────────────────────────────────────
+networking:
+  delete_default_vpcs: false
+  ipam: {}
+  dhcp_options_sets: {}
+  prefix_lists: {}
+  vpcs: {}
+    # shared_services:
+    #   cidr_block: "10.0.0.0/16"
+    #   enable_dns_support: true
+    #   enable_dns_hostnames: true
+    #   subnets:
+    #     public_a:
+    #       cidr_block: "10.0.1.0/24"
+    #       availability_zone: "us-east-1a"
+    #       map_public_ip_on_launch: true
+    #       route_table_key: "public"
+    #     private_a:
+    #       cidr_block: "10.0.10.0/24"
+    #       availability_zone: "us-east-1a"
+    #       route_table_key: "private"
+    #   route_tables:
+    #     public:
+    #       routes:
+    #         igw:
+    #           cidr_block: "0.0.0.0/0"
+    #           gateway_id_from: "igw"
+    #     private: {}
+    #   internet_gateway: true
+    #   nat_gateways:
+    #     az_a:
+    #       subnet_key: "public_a"
+    #   vpc_endpoints: {}
+    #   flow_logs:
+    #     cloudwatch:
+    #       traffic_type: "REJECT"
+    #       destination_type: "cloud-watch-logs"
+  vpc_peering: {}
+  transit_gateways: {}
+    # main:
+    #   description: "Main transit gateway"
+    #   amazon_side_asn: 64512
+    #   auto_accept_shared_attachments: "enable"
+    #   route_tables:
+    #     default: {}
+  transit_gateway_peering: {}
+  customer_gateways: {}
+  vpn_connections: {}
+  dx_gateways: {}
+  network_firewalls: {}
+  gateway_load_balancers: {}
+  route53_resolver: {}
+    # endpoints:
+    #   inbound:
+    #     direction: "INBOUND"
+    #     vpc_key: "shared_services"
+    #     ip_addresses:
+    #       - subnet_key: "private_a"
+    # rules: {}
+    # dns_firewall: {}
+    # query_logging: {}
+
+# ── Centralized Logging ─────────────────────────────────────────────────────
+centralized_logging:
+  central_log_bucket:
+    enabled: true
+    bucket_name: "acme-central-logs"
+    # kms_key_arn: "arn:aws:kms:us-east-1:111111111111:key/xxxx"
+    versioning: true
+    force_destroy: false
+    lifecycle_rules: []
+    allowed_account_ids: []
+  access_log_bucket:
+    enabled: true
+    bucket_name: "acme-access-logs"
+  cloudwatch_to_s3:
+    enabled: false
+    # firehose_name: "cloudwatch-to-s3"
+    # s3_prefix: "cloudwatch/"
+  session_manager_logging:
+    enabled: false
+    # s3_bucket_name: "acme-central-logs"
+    # s3_key_prefix: "session-logs/"
+    # cloudwatch_log_group: "/aws/ssm/session-manager"
+
+# ── Config Rules ─────────────────────────────────────────────────────────────
+config_rules:
+  config_recorder:
+    enabled: false
+    # name: "default"
+    # s3_bucket_name: "acme-config-history"
+  rules: {}
+    # s3_bucket_versioning:
+    #   source_identifier: "S3_BUCKET_VERSIONING_ENABLED"
+    # encrypted_volumes:
+    #   source_identifier: "ENCRYPTED_VOLUMES"
+    # root_mfa:
+    #   source_identifier: "ROOT_ACCOUNT_MFA_ENABLED"
+    #   maximum_frequency: "TwentyFour_Hours"
+  remediations: {}
+  org_rules: {}
+  conformance_packs: {}
+  # Org-wide conformance packs deployed to every member account via AWS Config.
+  # Templates live under policies/conformance-packs/. Paths are resolved
+  # relative to the stack working directory (stacks/landing-zone/).
+  org_conformance_packs:
+    cis-aws-foundations:
+      template_file: ../../policies/conformance-packs/cis-aws-foundations.yaml
+      excluded_accounts: []
+    nist-800-53-rev5:
+      template_file: ../../policies/conformance-packs/nist-800-53-rev5.yaml
+      excluded_accounts: []
+    pci-dss-v3-2-1:
+      template_file: ../../policies/conformance-packs/pci-dss-v3.2.1.yaml
+      excluded_accounts: []
+  aggregator:
+    enabled: false
+    # name: "org-aggregator"
+    # use_organization: true
+
+# ── KMS ──────────────────────────────────────────────────────────────────────
+kms:
+  keys: {}
+    # platform_key:
+    #   description: "Platform-wide encryption key"
+    #   enable_key_rotation: true
+    #   aliases:
+    #     - "alias/platform"
+    # logging_key:
+    #   description: "Central logging encryption key"
+    #   aliases:
+    #     - "alias/logging"
+
+# ── Macie ────────────────────────────────────────────────────────────────────
+macie:
+  admin_account_id: null
+  finding_frequency: "SIX_HOURS"
+  member_accounts: {}
+  classification_jobs: {}
+  custom_data_identifiers: {}
+
+# ── Detective ────────────────────────────────────────────────────────────────
+detective:
+  admin_account_id: null
+  member_accounts: {}
+
+# ── Audit Manager ───────────────────────────────────────────────────────────
+audit_manager:
+  admin_account_id: null
+  kms_key_id: null
+  s3_bucket: null
+  s3_prefix: "audit-manager"
+  assessments: {}
+  custom_frameworks: {}
+  custom_controls: {}
+
+# ── IAM Resources ───────────────────────────────────────────────────────────
+iam_resources:
+  account_alias: null
+  users: {}
+  groups: {}
+    # platform_admins:
+    #   path: "/"
+    #   policies:
+    #     - "arn:aws:iam::aws:policy/AdministratorAccess"
+  roles: {}
+    # cicd_role:
+    #   assume_role_policy: |
+    #     {
+    #       "Version": "2012-10-17",
+    #       "Statement": [{ "Effect": "Allow", "Principal": {"Service": "codebuild.amazonaws.com"}, "Action": "sts:AssumeRole" }]
+    #     }
+    #   policies:
+    #     - "arn:aws:iam::aws:policy/PowerUserAccess"
+  policies: {}
+  saml_providers: {}
+  instance_profiles: {}
+
+# ── Customizations ──────────────────────────────────────────────────────────
+customizations:
+  cloudformation_stacks: {}
+  cloudformation_stacksets: {}
+    # vpc_flow_logs:
+    #   template_url: "https://s3.amazonaws.com/mybucket/vpc-flow-logs.yaml"
+    #   parameters:
+    #     RetentionDays: "90"
+    #   target_ou_ids:
+    #     - "ou-xxxx-workloads"
+    #   target_regions:
+    #     - "us-east-1"
+  service_catalog_portfolios: {}
+  application_load_balancers: {}
+  network_load_balancers: {}
+  launch_templates: {}
+  autoscaling_groups: {}
+
+# ── Control Tower ───────────────────────────────────────────────────────────
+control_tower:
+  controls: {}
+    # disallow_vpc_internet_access:
+    #   control_identifier: "arn:aws:controltower:us-east-1::control/AWS-GR_DISALLOW_VPC_INTERNET_ACCESS"
+    #   target_ou_arn: "arn:aws:organizations::111111111111:ou/o-xxxx/ou-xxxx-workloads"
+    # require_s3_encryption:
+    #   control_identifier: "arn:aws:controltower:us-east-1::control/AWS-GR_S3_BUCKET_DEFAULT_ENCRYPTION"
+    #   target_ou_arn: "arn:aws:organizations::111111111111:ou/o-xxxx/ou-xxxx-workloads"
+  quarantine_scp:
+    enabled: false
+  landing_zone:
+    enabled: false
+    # governed_regions:
+    #   - "us-east-1"
+    #   - "us-west-2"
+
+# ── SSM ──────────────────────────────────────────────────────────────────────
+ssm:
+  parameters: {}
+    # account_vending_version:
+    #   type: "String"
+    #   value: "1.0.0"
+    #   description: "Current account vending machine version"
+  documents: {}
+  associations: {}
+  maintenance_windows: {}
+    # weekly_patching:
+    #   schedule: "cron(0 2 ? * SUN *)"
+    #   duration: 4
+    #   cutoff: 1
+  patch_baselines: {}
+  default_patch_baselines: {}
+
+# ── Backup ───────────────────────────────────────────────────────────────────
+backup:
+  region_settings:
+    enabled: false
+  vaults: {}
+    # central_vault:
+    #   kms_key_arn: null
+    #   force_destroy: false
+  plans: {}
+    # daily_backup:
+    #   vault_key: "central_vault"
+    #   rules:
+    #     daily:
+    #       schedule: "cron(0 5 ? * * *)"
+    #       start_window: 60
+    #       completion_window: 180
+    #       delete_after_days: 35
+    #       copy_actions: {}
+    #   selections:
+    #     tagged_resources:
+    #       iam_role_arn: null
+    #       selection_tags:
+    #         - type: "STRINGEQUALS"
+    #           key: "backup"
+    #           value: "daily"
+  org_policy:
+    enabled: false
+    # name: "org-backup-policy"
+    # target_ids: []
+
+# ── Cost Reporting ───────────────────────────────────────────────────────────
+cost_reporting:
+  cost_usage_reports: {}
+    # main_cur:
+    #   s3_bucket: "acme-cur-reports"
+    #   s3_prefix: "cur"
+    #   time_unit: "DAILY"
+    #   format: "Parquet"
+  anomaly_monitors: {}
+    # service_monitor:
+    #   monitor_type: "DIMENSIONAL"
+    #   monitor_dimension: "SERVICE"
+  anomaly_subscriptions: {}
+    # daily_alerts:
+    #   frequency: "DAILY"
+    #   monitor_keys:
+    #     - "service_monitor"
+    #   threshold: 100
+    #   subscribers:
+    #     - type: "EMAIL"
+    #       address: "finops@acme.com"
+  budgets: {}
+    # org_monthly:
+    #   limit_amount: "50000"
+    #   time_unit: "MONTHLY"
+    #   notifications:
+    #     - threshold: 80
+    #       subscriber_email_addresses:
+    #         - "finops@acme.com"
