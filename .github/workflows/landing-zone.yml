@@ -17,7 +17,7 @@ on:
     # Daily 06:00 UTC drift detection — re-applies config so manual changes
     # made via console/CLI are reverted automatically. Mirrors AWS LZA's
     # scheduled pipeline behaviour.
-    - cron: '0 6 * * *'
+    #- cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       action:
