@@ -118,42 +118,14 @@ jobs:
         if: always()
         env:
           TOPIC_ARN: ${{ secrets.OPS_NOTIFICATION_TOPIC_ARN }}
+          DRIFT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [[ ! -f deploy-report.json ]]; then
             echo "No deploy report; skipping drift alert."
             exit 0
           fi
 
-          # Build a human-readable drift summary from the report
-          DRIFT_MSG=$(python3 - <<'PYEOF'
-import json, sys
-
-try:
-    report = json.load(open("deploy-report.json"))
-except Exception as e:
-    print(f"Cannot parse report: {e}", file=sys.stderr)
-    sys.exit(0)
-
-remediated = [r for r in report.get("results", []) if r["status"] == "applied"]
-detected   = [r for r in report.get("results", []) if r["status"] == "planned"]
-
-if not remediated and not detected:
-    sys.exit(0)  # no output → no drift alert
-
-lines = []
-if remediated:
-    lines.append(f"Auto-remediated drift in {len(remediated)} account(s):")
-    for r in remediated:
-        lines.append(f"  - {r['account_id']} ({r['account_name']})")
-if detected:
-    lines.append(f"Drift detected (plan-only) in {len(detected)} account(s):")
-    for r in detected:
-        lines.append(f"  - {r['account_id']} ({r['account_name']})")
-
-lines.append(f"\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
-print("\n".join(lines))
-PYEOF
-)
+          DRIFT_MSG=$(python3 scripts/generate_drift_report.py)
 
           if [[ -z "$DRIFT_MSG" ]]; then
             echo "No drift detected — all accounts clean."
@@ -178,11 +150,7 @@ PYEOF
             exit 0
           fi
 
-          DRIFTED_COUNT=$(python3 -c "
-import json
-r = json.load(open('deploy-report.json'))
-print(sum(1 for x in r.get('results',[]) if x['status'] in ('applied','planned')))
-")
+          DRIFTED_COUNT=$(python3 -c "import json; r=json.load(open('deploy-report.json')); print(sum(1 for x in r.get('results',[]) if x['status'] in ('applied','planned')))")
           aws sns publish \
             --topic-arn "$TOPIC_ARN" \
             --subject "[LZ] Drift detected: ${DRIFTED_COUNT} account(s)" \
