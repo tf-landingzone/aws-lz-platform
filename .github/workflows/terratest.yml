@@ -28,8 +28,8 @@ on:
         required: false
         type: boolean
         default: false
-  schedule:
-    - cron: '0 4 * * 0'  # Sun 04:00 UTC
+  # schedule disabled — manual only for now
+  # - cron: '0 4 * * 0'  # Sun 04:00 UTC
 
 concurrency:
   group: terratest

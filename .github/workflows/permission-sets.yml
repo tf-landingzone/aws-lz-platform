@@ -8,14 +8,7 @@
 name: Permission Sets
 
 on:
-  push:
-    paths:
-      - "stacks/permission-sets/**"
-    branches: [main]
-  pull_request:
-    paths:
-      - "stacks/permission-sets/**"
-  workflow_dispatch:
+  workflow_dispatch:  # MANUAL ONLY — push/pull_request triggers disabled
 
 concurrency:
   group: permission-sets

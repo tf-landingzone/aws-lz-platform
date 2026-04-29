@@ -14,9 +14,7 @@
 name: Account Setup Drift Sweep
 
 on:
-  schedule:
-    #- cron: '0 2 * * *'
-  workflow_dispatch:
+  workflow_dispatch:  # MANUAL ONLY — schedule disabled
     inputs:
       max_parallel:
         description: "Concurrent terraform workers (default 50)"

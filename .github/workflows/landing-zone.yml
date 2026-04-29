@@ -1,24 +1,7 @@
 name: Landing Zone Deploy
 
 on:
-  push:
-    paths:
-      - 'config/landing-zone.yaml'
-      - 'modules/**'
-      - 'stacks/landing-zone/**'
-    branches:
-      - main
-  pull_request:
-    paths:
-      - 'config/landing-zone.yaml'
-      - 'modules/**'
-      - 'stacks/landing-zone/**'
-  schedule:
-    # Daily 06:00 UTC drift detection — re-applies config so manual changes
-    # made via console/CLI are reverted automatically. Mirrors AWS LZA's
-    # scheduled pipeline behaviour.
-    #- cron: '0 6 * * *'
-  workflow_dispatch:
+  workflow_dispatch:  # MANUAL ONLY — push/pull_request/schedule disabled
     inputs:
       action:
         description: "Terraform action to perform"
