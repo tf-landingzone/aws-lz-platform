@@ -63,6 +63,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Checkout accounts repo (for account metadata + resolve_account.py)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: tf-landingzone/aws-lz-accounts
+          path: accounts-repo
+          token: ${{ github.token }}
+
       - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -90,6 +97,9 @@ jobs:
           ENV_FILTER: ${{ inputs.env_filter }}
           PLAN_ONLY: ${{ inputs.plan_only }}
           DEPLOY_RUN_STATE_TABLE: ${{ secrets.DEPLOY_RUN_STATE_TABLE || 'acme-lz-deploy-run-state' }}
+          # Point deploy_accounts.py at the accounts repo for metadata + resolve script
+          LZ_ACCOUNTS_DIR: ${{ github.workspace }}/accounts-repo/accounts
+          LZ_RESOLVE_SCRIPT: ${{ github.workspace }}/accounts-repo/scripts/resolve_account.py
         run: |
           set -euo pipefail
           ARGS=(--all --max-parallel "$MAX_PARALLEL")

@@ -69,7 +69,11 @@ from pathlib import Path
 from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ACCOUNTS_DIR = REPO_ROOT / "accounts"
+# ACCOUNTS_DIR and RESOLVE_SCRIPT can be overridden via env vars so that the
+# drift-sweep workflow (which only checks out aws-lz-platform) can point at
+# the separately-checked-out aws-lz-accounts directory.
+ACCOUNTS_DIR = Path(os.environ.get("LZ_ACCOUNTS_DIR", str(REPO_ROOT / "accounts")))
+RESOLVE_SCRIPT = Path(os.environ.get("LZ_RESOLVE_SCRIPT", str(REPO_ROOT / "scripts" / "resolve_account.py")))
 STACK_DIR = REPO_ROOT / "stacks" / "account-setup"
 WORK_ROOT = REPO_ROOT / ".deploy_workdir"
 LOG_DIR = REPO_ROOT / "logs"
@@ -350,9 +354,9 @@ def deploy_one(
 
             # 1. Generate tfvars (writes into stack dir; we then copy to workdir)
             rc = _run(
-                ["python3", str(REPO_ROOT / "scripts" / "resolve_account.py"),
+                ["python3", str(RESOLVE_SCRIPT),
                  task.account_id, task.account_name],
-                cwd=REPO_ROOT, env=env, log_fp=log_fp,
+                cwd=RESOLVE_SCRIPT.parent.parent, env=env, log_fp=log_fp,
             )
             if rc != 0:
                 if verbose:
