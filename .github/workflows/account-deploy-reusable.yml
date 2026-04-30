@@ -75,6 +75,7 @@ jobs:
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: "~> 1.9"
+          terraform_wrapper: false
 
       - name: Terraform Init
         working-directory: ${{ env.TF_DIR }}
@@ -123,7 +124,7 @@ jobs:
         with:
           name: tfplan
           path: ${{ env.TF_DIR }}/tfplan
-          retention-days: 1
+          retention-days: 7
 
   # ── Terraform Apply ────────────────────────────────────────────────────────
   apply:

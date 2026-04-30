@@ -317,6 +317,34 @@ def _read_log_tail(log_path: Path, n: int = 30) -> str:
         return ""
 
 
+def _write_account_meta(task: AccountTask) -> None:
+    """Persist account.json in ACCOUNTS_DIR after a successful apply.
+
+    This file is the source of truth for discover_accounts() used by the
+    drift sweep (--all flag). Without it, provisioned accounts are invisible
+    to the sweep.
+    """
+    meta_dir = ACCOUNTS_DIR / task.account_id
+    try:
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        (meta_dir / "account.json").write_text(
+            json.dumps(
+                {
+                    "account_id": task.account_id,
+                    "account_name": task.account_name,
+                    "environment": task.environment,
+                    "ou": task.ou,
+                    "status": "provisioned",
+                    "provisioned_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+    except OSError as e:
+        print(f"warning: could not write account.json for {task.account_id}: {e}", file=sys.stderr)
+
+
 def deploy_one(
     task: AccountTask,
     *,
@@ -347,6 +375,10 @@ def deploy_one(
             "TF_IN_AUTOMATION": "1",
             "AWS_REGION": region,
             "AWS_DEFAULT_REGION": region,
+            # Share provider binaries across parallel workers — cuts init time
+            # from ~60s/worker to ~5s after first download.
+            "TF_PLUGIN_CACHE_DIR": "/tmp/tf-plugin-cache",
+            "TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE": "1",
         }
 
         with log_path.open("a") as log_fp:
@@ -468,6 +500,10 @@ def deploy_one(
             )
             if run_state:
                 run_state.record(result)
+
+            # Write account metadata so discover_accounts() can find it on drift sweeps
+            _write_account_meta(task)
+
             return result
 
     result = AccountResult(
@@ -496,6 +532,7 @@ def run_fleet(
         return []
     LOG_DIR.mkdir(exist_ok=True)
     WORK_ROOT.mkdir(exist_ok=True)
+    Path("/tmp/tf-plugin-cache").mkdir(parents=True, exist_ok=True)
     results: list[AccountResult] = []
 
     # Resume: skip accounts that already succeeded in a prior run
@@ -587,7 +624,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     p.add_argument("--name-pattern", default=None, help="Regex on account_name.")
     p.add_argument("--all", action="store_true", help="Sweep every provisioned account.")
     p.add_argument("--plan-only", action="store_true", help="Plan but do not apply.")
-    p.add_argument("--max-parallel", type=int, default=50, help="Concurrent terraform workers (default 50).")
+    p.add_argument("--max-parallel", type=int, default=10, help="Concurrent terraform workers (default 10).")
     p.add_argument("--max-attempts", type=int, default=3, help="Retries on transient failures.")
     p.add_argument("--state-bucket", default=os.environ.get("TF_STATE_BUCKET", "acme-lz-terraform-state"))
     p.add_argument("--region", default=os.environ.get("AWS_REGION", "us-east-1"))
