@@ -29,6 +29,13 @@ OU="${OU:-}"
 PLAN_ONLY="${PLAN_ONLY:-false}"
 LZ_INVENTORY_TABLE="${LZ_INVENTORY_TABLE:-lz-account-inventory}"
 POLICY_MAP_S3_KEY="${POLICY_MAP_S3_KEY:-config/account_policy_map.yaml}"
+# S3 prefix where sync-runtime-to-s3.yml publishes the current code artefacts.
+# Layout under this prefix mirrors /app/:
+#   runtime/stack/     → stacks/account-setup/*.tf
+#   runtime/modules/   → modules/account-baseline/**
+#   runtime/policies/  → policies/*.json
+#   runtime/scripts/   → scripts/resolve_account.py + hcl_writer.py
+RUNTIME_S3_PREFIX="${RUNTIME_S3_PREFIX:-runtime}"
 
 WORK_DIR="/app/.deploy_workdir/${ACCOUNT_ID}"
 STACK_SRC="/app/stacks/account-setup"
@@ -36,26 +43,59 @@ POLICY_MAP_LOCAL="/app/account_policy_map.yaml"
 TF_VARS="${WORK_DIR}/terraform.tfvars"
 
 echo "==================================================================="
-echo " tf-executor  v1.0"
+echo " tf-executor  v1.1  (runtime-sync model)"
 echo " account_id  : ${ACCOUNT_ID}"
 echo " account_name: ${ACCOUNT_NAME}"
 echo " environment : ${ENVIRONMENT}"
 echo " ou          : ${OU:-<none>}"
 echo " plan_only   : ${PLAN_ONLY}"
 echo " state_bucket: ${TF_STATE_BUCKET}  region: ${AWS_REGION}"
+echo " runtime s3  : s3://${TF_STATE_BUCKET}/${RUNTIME_S3_PREFIX}/"
 echo "==================================================================="
 
 mkdir -p "${WORK_DIR}" "${TF_PLUGIN_CACHE_DIR:-/tmp/tf-plugin-cache}"
 
+# ── 0. Sync current runtime artefacts from S3 ────────────────────────────────
+# The Docker image contains ONLY the runtime (terraform + python + awscli).
+# All Terraform stack files, modules, policies, and scripts are stored in S3
+# and synced here at task startup. This means code changes (policy updates,
+# module changes, stack changes) take effect immediately without rebuilding
+# the image. The image only needs to be rebuilt when the runtime itself
+# changes (new Terraform version, new Python dependency, entrypoint logic).
+echo ""
+echo "[0/7] Syncing runtime artefacts from s3://${TF_STATE_BUCKET}/${RUNTIME_S3_PREFIX}/"
+
+aws s3 sync \
+    "s3://${TF_STATE_BUCKET}/${RUNTIME_S3_PREFIX}/stack/" \
+    "/app/stacks/account-setup/" \
+    --region "${AWS_REGION}" --no-progress --delete
+
+aws s3 sync \
+    "s3://${TF_STATE_BUCKET}/${RUNTIME_S3_PREFIX}/modules/" \
+    "/app/modules/" \
+    --region "${AWS_REGION}" --no-progress --delete
+
+aws s3 sync \
+    "s3://${TF_STATE_BUCKET}/${RUNTIME_S3_PREFIX}/policies/" \
+    "/app/policies/" \
+    --region "${AWS_REGION}" --no-progress --delete
+
+aws s3 sync \
+    "s3://${TF_STATE_BUCKET}/${RUNTIME_S3_PREFIX}/scripts/" \
+    "/app/scripts/" \
+    --region "${AWS_REGION}" --no-progress --delete
+
+echo "Runtime sync complete."
+
 # ── 1. Download account_policy_map.yaml ───────────────────────────────────────
 echo ""
-echo "[1/6] Downloading policy map from s3://${TF_STATE_BUCKET}/${POLICY_MAP_S3_KEY}"
+echo "[1/7] Downloading policy map from s3://${TF_STATE_BUCKET}/${POLICY_MAP_S3_KEY}"
 aws s3 cp "s3://${TF_STATE_BUCKET}/${POLICY_MAP_S3_KEY}" "${POLICY_MAP_LOCAL}" \
     --region "${AWS_REGION}" --no-progress
 
 # ── 2. Generate terraform.tfvars via resolve_account.py ──────────────────────
 echo ""
-echo "[2/6] Generating tfvars for ${ACCOUNT_NAME}"
+echo "[2/7] Generating tfvars for ${ACCOUNT_NAME}"
 ENV_ARG=()
 if [[ "${ENVIRONMENT}" != "auto" ]]; then
     ENV_ARG=(--environment "${ENVIRONMENT}")
@@ -67,13 +107,15 @@ python3 /app/scripts/resolve_account.py \
 
 # ── 3. Assemble per-account workdir ──────────────────────────────────────────
 echo ""
-echo "[3/6] Preparing isolated workdir"
+echo "[3/7] Preparing isolated workdir"
 # Copy TF files — each account gets its own .terraform/ to avoid races
+# Also copy the lock file so provider versions are pinned reproducibly
 cp "${STACK_SRC}"/*.tf "${WORK_DIR}/"
+[[ -f "${STACK_SRC}/.terraform.lock.hcl" ]] && cp "${STACK_SRC}/.terraform.lock.hcl" "${WORK_DIR}/"
 
 # ── 4. terraform init ─────────────────────────────────────────────────────────
 echo ""
-echo "[4/6] terraform init"
+echo "[4/7] terraform init"
 terraform -chdir="${WORK_DIR}" init \
     -backend-config="bucket=${TF_STATE_BUCKET}" \
     -backend-config="key=account-setup/${ACCOUNT_ID}/terraform.tfstate" \
@@ -82,12 +124,12 @@ terraform -chdir="${WORK_DIR}" init \
 
 # ── 5. terraform validate ─────────────────────────────────────────────────────
 echo ""
-echo "[5/6] terraform validate"
+echo "[5/7] terraform validate"
 terraform -chdir="${WORK_DIR}" validate -no-color
 
 # ── 6. terraform plan ─────────────────────────────────────────────────────────
 echo ""
-echo "[6/6] terraform plan"
+echo "[6/7] terraform plan"
 set +e
 terraform -chdir="${WORK_DIR}" plan \
     -var-file="${TF_VARS}" \
@@ -110,7 +152,7 @@ if [[ ${PLAN_EXIT} -eq 2 ]]; then
         TF_STATUS="planned"
     else
         echo ""
-        echo "[6/6] terraform apply"
+        echo "[6/7] terraform apply"
         terraform -chdir="${WORK_DIR}" apply \
             -auto-approve -no-color -input=false \
             "${WORK_DIR}/tfplan"

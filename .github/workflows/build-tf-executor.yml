@@ -1,24 +1,28 @@
 ###############################################################################
 # build-tf-executor.yml
 #
-# Builds and pushes the tf-executor Docker image to ECR whenever:
-#   - The account-setup Terraform stack changes
-#   - The Docker sources change
-#   - Invoked manually (workflow_dispatch)
+# Builds and pushes the tf-executor Docker image to ECR.
 #
-# BUILD CONTEXT ASSEMBLY
-#   The image needs files from 4 repositories:
-#     aws-lz-platform  → stacks/account-setup/, docker/tf-executor/
-#     aws-tf-modules   → modules/account-baseline/
-#     aws-lz-policies  → policies/
-#     aws-lz-accounts  → scripts/resolve_account.py, scripts/hcl_writer.py
+# WHEN TO REBUILD (rarely):
+#   The image now contains ONLY the runtime:
+#     - terraform binary
+#     - Python + boto3 + awscli
+#     - entrypoint.sh
 #
-#   All repos are checked out into a single build-context/ directory that
-#   matches the /app/ layout expected by the Dockerfile.
+#   Rebuild is only needed when the runtime itself changes:
+#     - New Terraform version
+#     - New Python dependency (boto3, pyyaml version bump)
+#     - entrypoint.sh logic change
+#     - Dockerfile change
+#
+# WHAT NO LONGER TRIGGERS A REBUILD:
+#   - stacks/account-setup/*.tf changes      ← synced to S3 by sync-runtime-to-s3.yml
+#   - modules/account-baseline/ changes      ← synced to S3 by sync-runtime-to-s3.yml
+#   - policies/*.json changes                ← synced to S3 by sync-runtime-to-s3.yml
+#   - scripts/resolve_account.py changes     ← synced to S3 by sync-runtime-to-s3.yml
 #
 # AFTER PUSH
-#   A 'terraform apply' is run against stacks/sfn-pipeline to update the
-#   ECS task definition with the new image tag (the commit SHA).
+#   A 'terraform apply' updates the ECS task definition with the new image tag.
 ###############################################################################
 
 name: Build tf-executor Image
@@ -27,9 +31,11 @@ on:
   push:
     branches: [main]
     paths:
-      - "stacks/account-setup/**"
+      # ONLY rebuild when the actual runtime changes.
+      # Code changes (TF files, modules, policies, scripts) are handled
+      # by sync-runtime-to-s3.yml — no image rebuild required.
       - "docker/tf-executor/**"
-      - "account_policy_map.yaml"
+
   workflow_dispatch:
     inputs:
       push_image:
@@ -51,60 +57,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ── Checkout aws-lz-platform (main repo, this workflow's repo) ─────────
+      # ── Checkout aws-lz-platform only — runtime files only ───────────────
       - name: Checkout aws-lz-platform
         uses: actions/checkout@v4
         with:
           path: build-context
-
-      # ── Checkout aws-tf-modules (Terraform modules) ───────────────────────
-      - name: Checkout aws-tf-modules
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/aws-tf-modules
-          token: ${{ secrets.PLATFORM_WORKFLOW_TOKEN }}
-          path: aws-tf-modules
-
-      # ── Checkout aws-lz-policies (IAM policy JSON files) ─────────────────
-      - name: Checkout aws-lz-policies
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/aws-lz-policies
-          token: ${{ secrets.PLATFORM_WORKFLOW_TOKEN }}
-          path: aws-lz-policies
-
-      # ── Checkout aws-lz-accounts (resolve_account.py + hcl_writer.py) ────
-      - name: Checkout aws-lz-accounts
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/aws-lz-accounts
-          token: ${{ secrets.PLATFORM_WORKFLOW_TOKEN }}
-          path: aws-lz-accounts
-
-      # ── Assemble Dockerfile build context ─────────────────────────────────
-      # Target layout (mirrors /app/ inside the container):
-      #   build-context/stacks/account-setup/*.tf   ← already there
-      #   build-context/modules/account-baseline/   ← from aws-tf-modules
-      #   build-context/policies/                   ← from aws-lz-policies
-      #   build-context/scripts/                    ← from aws-lz-accounts
-      - name: Assemble build context
-        run: |
-          set -euo pipefail
-          # Modules
-          mkdir -p build-context/modules
-          cp -r aws-tf-modules/modules/account-baseline build-context/modules/account-baseline
-
-          # Policies
-          mkdir -p build-context/policies
-          cp aws-lz-policies/policies/*.json build-context/policies/
-
-          # Scripts
-          mkdir -p build-context/scripts
-          cp aws-lz-accounts/scripts/resolve_account.py build-context/scripts/
-          cp aws-lz-accounts/scripts/hcl_writer.py      build-context/scripts/
-
-          echo "Build context contents:"
-          find build-context -not -path "*/\.*" | head -60
 
       # ── Authenticate to AWS ───────────────────────────────────────────────
       - name: Configure AWS credentials (OIDC)
