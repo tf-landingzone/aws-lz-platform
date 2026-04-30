@@ -37,7 +37,36 @@ def load_config(path: str) -> dict:
     return config
 
 
-def build_tfvars(config: dict) -> dict:
+def resolve_content_files(policies_dict: dict, base_dir: Path) -> dict:
+    """
+    For any policy entry that has a content_file path but no inline content,
+    read the file and replace with inline content so Terraform never needs to
+    call file() at plan/apply time (avoiding cross-module path ambiguity).
+
+    Paths in content_file are resolved relative to base_dir (repo root).
+    """
+    resolved = {}
+    for key, policy in policies_dict.items():
+        if not isinstance(policy, dict):
+            resolved[key] = policy
+            continue
+        policy = dict(policy)
+        content_file = policy.get("content_file")
+        if content_file and not policy.get("content"):
+            target = base_dir / content_file
+            if target.exists():
+                policy["content"] = target.read_text(encoding="utf-8").strip()
+                del policy["content_file"]
+            else:
+                print(
+                    f"Warning: content_file not found: {target} (keeping as-is)",
+                    file=sys.stderr,
+                )
+        resolved[key] = policy
+    return resolved
+
+
+def build_tfvars(config: dict, base_dir: Path | None = None) -> dict:
     """Transform YAML config into flat Terraform variable structure."""
     g = config.get("global", {})
     features = config.get("features", {})
@@ -103,10 +132,20 @@ def build_tfvars(config: dict) -> dict:
     tfvars["delegated_administrators"] = org_cfg.get("delegated_administrators", {})
 
     # ── Governance ───────────────────────────────────────────────────────
-    tfvars["service_control_policies"] = gov_cfg.get("service_control_policies", {})
-    tfvars["tag_policies"] = gov_cfg.get("tag_policies", {})
-    tfvars["backup_policies"] = gov_cfg.get("backup_policies", {})
-    tfvars["ai_services_opt_out_policies"] = gov_cfg.get("ai_services_opt_out_policies", {})
+    raw_scps = gov_cfg.get("service_control_policies", {})
+    raw_tag_policies = gov_cfg.get("tag_policies", {})
+    raw_backup_policies = gov_cfg.get("backup_policies", {})
+    raw_ai_optout = gov_cfg.get("ai_services_opt_out_policies", {})
+    if base_dir is not None:
+        tfvars["service_control_policies"] = resolve_content_files(raw_scps, base_dir)
+        tfvars["tag_policies"] = resolve_content_files(raw_tag_policies, base_dir)
+        tfvars["backup_policies"] = resolve_content_files(raw_backup_policies, base_dir)
+        tfvars["ai_services_opt_out_policies"] = resolve_content_files(raw_ai_optout, base_dir)
+    else:
+        tfvars["service_control_policies"] = raw_scps
+        tfvars["tag_policies"] = raw_tag_policies
+        tfvars["backup_policies"] = raw_backup_policies
+        tfvars["ai_services_opt_out_policies"] = raw_ai_optout
 
     # ── Identity Center ──────────────────────────────────────────────────
     tfvars["group_lookups"] = ic_cfg.get("group_lookups", {})
@@ -253,7 +292,8 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
-    tfvars = build_tfvars(config)
+    base_dir = Path(args.config).resolve().parent.parent
+    tfvars = build_tfvars(config, base_dir=base_dir)
 
     output_path = Path(args.output)
     write_tfvars(tfvars, output_path)

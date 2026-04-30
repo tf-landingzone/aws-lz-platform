@@ -227,7 +227,7 @@ budget_alerts:
 # a new account. EventBridge → Lambda → GitHub Actions workflow_dispatch.
 account_factory_trigger:
   enabled: true
-  github_repo: "CloudPeer360/automates-iam-policy-deployment"
+  github_repo: "tf-landingzone/aws-lz-accounts"
   github_workflow_id: "account-setup.yml"
   github_ref: "main"
   github_token_secret_arn: "arn:aws:secretsmanager:us-east-1:111111111111:secret:github-pat-XXXXXX"  # TODO: Update with real ARN
