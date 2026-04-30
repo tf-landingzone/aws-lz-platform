@@ -1,0 +1,199 @@
+###############################################################################
+# build-tf-executor.yml
+#
+# Builds and pushes the tf-executor Docker image to ECR whenever:
+#   - The account-setup Terraform stack changes
+#   - The Docker sources change
+#   - Invoked manually (workflow_dispatch)
+#
+# BUILD CONTEXT ASSEMBLY
+#   The image needs files from 4 repositories:
+#     aws-lz-platform  → stacks/account-setup/, docker/tf-executor/
+#     aws-tf-modules   → modules/account-baseline/
+#     aws-lz-policies  → policies/
+#     aws-lz-accounts  → scripts/resolve_account.py, scripts/hcl_writer.py
+#
+#   All repos are checked out into a single build-context/ directory that
+#   matches the /app/ layout expected by the Dockerfile.
+#
+# AFTER PUSH
+#   A 'terraform apply' is run against stacks/sfn-pipeline to update the
+#   ECS task definition with the new image tag (the commit SHA).
+###############################################################################
+
+name: Build tf-executor Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "stacks/account-setup/**"
+      - "docker/tf-executor/**"
+      - "account_policy_map.yaml"
+  workflow_dispatch:
+    inputs:
+      push_image:
+        description: "Push image to ECR after build"
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write   # OIDC
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPO_NAME: lz-tf-executor
+
+jobs:
+  build-and-push:
+    name: Build & Push tf-executor
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Checkout aws-lz-platform (main repo, this workflow's repo) ─────────
+      - name: Checkout aws-lz-platform
+        uses: actions/checkout@v4
+        with:
+          path: build-context
+
+      # ── Checkout aws-tf-modules (Terraform modules) ───────────────────────
+      - name: Checkout aws-tf-modules
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/aws-tf-modules
+          token: ${{ secrets.PLATFORM_WORKFLOW_TOKEN }}
+          path: aws-tf-modules
+
+      # ── Checkout aws-lz-policies (IAM policy JSON files) ─────────────────
+      - name: Checkout aws-lz-policies
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/aws-lz-policies
+          token: ${{ secrets.PLATFORM_WORKFLOW_TOKEN }}
+          path: aws-lz-policies
+
+      # ── Checkout aws-lz-accounts (resolve_account.py + hcl_writer.py) ────
+      - name: Checkout aws-lz-accounts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/aws-lz-accounts
+          token: ${{ secrets.PLATFORM_WORKFLOW_TOKEN }}
+          path: aws-lz-accounts
+
+      # ── Assemble Dockerfile build context ─────────────────────────────────
+      # Target layout (mirrors /app/ inside the container):
+      #   build-context/stacks/account-setup/*.tf   ← already there
+      #   build-context/modules/account-baseline/   ← from aws-tf-modules
+      #   build-context/policies/                   ← from aws-lz-policies
+      #   build-context/scripts/                    ← from aws-lz-accounts
+      - name: Assemble build context
+        run: |
+          set -euo pipefail
+          # Modules
+          mkdir -p build-context/modules
+          cp -r aws-tf-modules/modules/account-baseline build-context/modules/account-baseline
+
+          # Policies
+          mkdir -p build-context/policies
+          cp aws-lz-policies/policies/*.json build-context/policies/
+
+          # Scripts
+          mkdir -p build-context/scripts
+          cp aws-lz-accounts/scripts/resolve_account.py build-context/scripts/
+          cp aws-lz-accounts/scripts/hcl_writer.py      build-context/scripts/
+
+          echo "Build context contents:"
+          find build-context -not -path "*/\.*" | head -60
+
+      # ── Authenticate to AWS ───────────────────────────────────────────────
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PLATFORM_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── Authenticate to ECR ───────────────────────────────────────────────
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Build image ───────────────────────────────────────────────────────
+      - name: Build Docker image
+        id: build
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          IMAGE="${REGISTRY}/${ECR_REPO_NAME}"
+          docker build \
+            --file build-context/docker/tf-executor/Dockerfile \
+            --tag "${IMAGE}:${TAG}" \
+            --tag "${IMAGE}:latest" \
+            --label "git.sha=${{ github.sha }}" \
+            --label "git.ref=${{ github.ref_name }}" \
+            --cache-from "${IMAGE}:latest" \
+            build-context
+
+          echo "image=${IMAGE}:${TAG}" >> "$GITHUB_OUTPUT"
+          echo "registry=${REGISTRY}"  >> "$GITHUB_OUTPUT"
+
+      # ── Scan for vulnerabilities ──────────────────────────────────────────
+      - name: Scan image (Trivy)
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref: ${{ steps.build.outputs.image }}
+          format: "table"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+          ignore-unfixed: true
+        continue-on-error: false  # fail the workflow on critical CVEs
+
+      # ── Push to ECR ───────────────────────────────────────────────────────
+      - name: Push to ECR
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.push_image }}
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          IMAGE="${REGISTRY}/${ECR_REPO_NAME}"
+          docker push "${IMAGE}:${TAG}"
+          docker push "${IMAGE}:latest"
+          echo "Pushed ${IMAGE}:${TAG}"
+
+  # ── After successful push: update ECS task definition via Terraform ────────
+  update-task-definition:
+    name: Update ECS task definition
+    needs: build-and-push
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.push_image }}
+    runs-on: ubuntu-latest
+    environment: management  # requires approval gate if configured
+
+    steps:
+      - name: Checkout aws-lz-platform
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PLATFORM_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
+          terraform_wrapper: false
+
+      - name: Terraform init (sfn-pipeline)
+        working-directory: stacks/sfn-pipeline
+        run: terraform init -no-color -input=false
+
+      - name: Terraform apply — update ecr_image_tag
+        working-directory: stacks/sfn-pipeline
+        env:
+          TF_VAR_ecr_image_tag: ${{ github.sha }}
+        run: |
+          terraform apply \
+            -auto-approve -no-color -input=false \
+            -var "ecr_image_tag=${TF_VAR_ecr_image_tag}"

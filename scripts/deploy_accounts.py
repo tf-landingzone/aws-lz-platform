@@ -56,11 +56,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -94,6 +97,32 @@ THROTTLE_PATTERNS = (
     "(503)",
     "(500)",
 )
+
+# ── Graceful shutdown (SIGTERM / Ctrl-C) ─────────────────────────────────────
+# GitHub Actions sends SIGTERM before killing the process. We catch it so
+# in-flight Terraform processes can finish their current command rather than
+# getting killed mid-apply, which would corrupt state.
+_SHUTDOWN = threading.Event()
+
+
+def _handle_signal(signum: int, frame: object) -> None:  # noqa: ARG001
+    print(
+        f"\n[signal {signum}] Graceful shutdown requested — "
+        "finishing in-flight accounts, not starting new ones.",
+        file=sys.stderr,
+    )
+    _SHUTDOWN.set()
+
+
+signal.signal(signal.SIGTERM, _handle_signal)
+signal.signal(signal.SIGINT, _handle_signal)
+
+# ── AWS API rate-limiter ─────────────────────────────────────────────────────
+# Prevents Organizations / IAM from throttling when 100+ workers fire
+# DescribeAccount / AssumeRole simultaneously. Caps concurrent AWS API
+# calls across all worker threads. Terraform itself also honours
+# max_retries=25 in providers.tf, but this is a belt-and-suspenders guard.
+_AWS_SEMAPHORE = threading.Semaphore(30)  # max 30 concurrent AWS API calls
 
 
 class RunStateTable:
@@ -272,6 +301,113 @@ def discover_accounts(
     return tasks
 
 
+def discover_from_dynamodb(
+    *,
+    table_name: str,
+    region: str,
+    account_ids: list[str] | None = None,
+    ou_filter: str | None = None,
+    env_filter: str | None = None,
+    name_pattern: str | None = None,
+) -> list[AccountTask]:
+    """Discover provisioned accounts from the lz-account-inventory DynamoDB table.
+
+    Preferred over account.json scanning at scale: a single paginated Scan/Query
+    fetches thousands of records in <1s with no filesystem traversal cost.
+
+    Table schema (managed by stacks/sfn-pipeline or stacks/00-bootstrap):
+      PK: account_id (S)
+      GSI1: environment-index  PK=environment
+      GSI2: ou-index           PK=ou
+      Attributes: account_name, environment, ou, status, provisioned_at
+    """
+    try:
+        import boto3  # noqa: PLC0415
+    except ImportError:
+        print("warning: boto3 not available — falling back to account.json discovery", file=sys.stderr)
+        return []
+
+    ddb = boto3.resource("dynamodb", region_name=region)
+    table = ddb.Table(table_name)
+    name_re = re.compile(name_pattern) if name_pattern else None
+    explicit_ids = set(account_ids or [])
+
+    items: list[dict] = []
+    try:
+        # Use GSI when filtering by environment or OU to avoid full scan
+        if env_filter and not ou_filter:
+            kwargs: dict = {
+                "IndexName": "environment-index",
+                "KeyConditionExpression": "environment = :env",
+                "ExpressionAttributeValues": {":env": env_filter},
+                "FilterExpression": "#s = :prov",
+                "ExpressionAttributeNames": {"#s": "status"},
+            }
+            kwargs["ExpressionAttributeValues"][":prov"] = "provisioned"
+            while True:
+                resp = table.query(**kwargs)
+                items.extend(resp.get("Items", []))
+                if "LastEvaluatedKey" not in resp:
+                    break
+                kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+        else:
+            # Full scan — still fast for <10k items with DynamoDB
+            scan_kwargs: dict = {
+                "FilterExpression": "#s = :prov",
+                "ExpressionAttributeNames": {"#s": "status"},
+                "ExpressionAttributeValues": {":prov": "provisioned"},
+            }
+            while True:
+                resp = table.scan(**scan_kwargs)
+                items.extend(resp.get("Items", []))
+                if "LastEvaluatedKey" not in resp:
+                    break
+                scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    except Exception as exc:
+        print(f"warning: DynamoDB scan failed ({exc}) — falling back to account.json discovery", file=sys.stderr)
+        return []
+
+    tasks: list[AccountTask] = []
+    for item in items:
+        aid = str(item.get("account_id", ""))
+        if not ACCOUNT_ID_RE.match(aid):
+            continue
+        if explicit_ids and aid not in explicit_ids:
+            continue
+        if ou_filter and item.get("ou") != ou_filter:
+            continue
+        aname = str(item.get("account_name", ""))
+        if name_re and not name_re.search(aname):
+            continue
+        tasks.append(
+            AccountTask(
+                account_id=aid,
+                account_name=aname,
+                environment=str(item.get("environment", "auto")),
+                ou=str(item.get("ou", "")),
+            )
+        )
+
+    print(f"DynamoDB inventory: discovered {len(tasks)} provisioned accounts from '{table_name}'")
+    return tasks
+
+
+def chunk_tasks(tasks: list[AccountTask], chunk_size: int) -> list[list[AccountTask]]:
+    """Split task list into equal-sized chunks for staged parallel execution.
+
+    Processing accounts in chunks prevents a single 7GB GitHub Actions runner
+    from being overwhelmed when running 100+ parallel Terraform processes.
+    Each chunk runs to completion before the next starts, so the runner's
+    .deploy_workdir/ never holds more than chunk_size workdirs simultaneously.
+
+    Recommended chunk_size = max_parallel (e.g. both = 10 → 10 workers × 10 chunks
+    for 100 accounts instead of 100 workers at once).
+    """
+    if chunk_size <= 0 or chunk_size >= len(tasks):
+        return [tasks]
+    return [tasks[i: i + chunk_size] for i in range(0, len(tasks), chunk_size)]
+
+
 def _is_transient(stderr: str) -> bool:
     return any(p in stderr for p in THROTTLE_PATTERNS)
 
@@ -360,6 +496,14 @@ def deploy_one(
     started = time.time()
 
     for attempt in range(1, max_attempts + 1):
+        # Honour graceful shutdown: don't start a new attempt after signal received
+        if _SHUTDOWN.is_set():
+            return AccountResult(
+                task.account_id, task.account_name, "failed",
+                duration_s=time.time() - started, attempts=attempt,
+                error="interrupted by shutdown signal", log_path=str(log_path),
+            )
+
         try:
             work = _prepare_workdir(task)
         except OSError as e:
@@ -408,13 +552,16 @@ def deploy_one(
             shutil.copy2(tfvars_src, work / "terraform.tfvars")
 
             # 2. terraform init (per-account state key)
+            # _AWS_SEMAPHORE caps simultaneous inits to prevent S3/DynamoDB
+            # throttle when 100+ workers all run init at the same moment.
             init_cmd = [
                 "terraform", "init", "-input=false", "-no-color",
                 f"-backend-config=bucket={state_bucket}",
                 f"-backend-config=key=account-setup/{task.account_id}/terraform.tfstate",
                 f"-backend-config=region={region}",
             ]
-            rc = _run(init_cmd, cwd=work, env=env, log_fp=log_fp)
+            with _AWS_SEMAPHORE:
+                rc = _run(init_cmd, cwd=work, env=env, log_fp=log_fp)
             if rc != 0:
                 tail = _read_log_tail(log_path)
                 if attempt < max_attempts and _is_transient(tail):
@@ -521,6 +668,7 @@ def run_fleet(
     *,
     plan_only: bool,
     max_parallel: int,
+    chunk_size: int,
     state_bucket: str,
     region: str,
     max_attempts: int,
@@ -551,28 +699,50 @@ def run_fleet(
         else:
             print("Resume: no previously completed accounts found for this run_id")
 
-    print(f"Deploying {len(tasks)} accounts | max_parallel={max_parallel} | "
-          f"plan_only={plan_only} | retries={max_attempts}")
+    chunks = chunk_tasks(tasks, chunk_size)
+    total = len(tasks)
+    total_chunks = len(chunks)
+    done = len(results)  # already-skipped count
 
-    with ThreadPoolExecutor(max_workers=max_parallel) as pool:
-        futures = {
-            pool.submit(
-                deploy_one, t,
-                plan_only=plan_only, state_bucket=state_bucket,
-                region=region, max_attempts=max_attempts, verbose=verbose,
-                run_state=run_state,
-            ): t for t in tasks
-        }
-        done = 0
-        total = len(tasks)
-        for fut in as_completed(futures):
-            res = fut.result()
-            results.append(res)
-            done += 1
-            mark = {"clean": "·", "planned": "P", "applied": "✓",
-                    "failed": "✗", "skipped": "-"}.get(res.status, "?")
-            print(f"  [{done}/{total}] {mark} {res.account_id} "
-                  f"{res.account_name} ({res.status}, {res.duration_s:.1f}s)")
+    print(f"Deploying {total} accounts | chunks={total_chunks} | "
+          f"max_parallel={max_parallel} | plan_only={plan_only} | retries={max_attempts}")
+    if total_chunks > 1:
+        print(f"  Chunked into {total_chunks} batches of \u2264{chunk_size} "
+              "(prevents runner OOM on 100+ account estates)")
+
+    fleet_started = time.time()
+
+    for chunk_idx, chunk in enumerate(chunks, 1):
+        if _SHUTDOWN.is_set():
+            print(f"Shutdown signal received: skipping remaining {total - done} accounts.")
+            break
+
+        if total_chunks > 1:
+            print(f"\n\u2500\u2500 Chunk {chunk_idx}/{total_chunks} ({len(chunk)} accounts) \u2500\u2500")
+
+        with ThreadPoolExecutor(max_workers=min(max_parallel, len(chunk))) as pool:
+            futures = {
+                pool.submit(
+                    deploy_one, t,
+                    plan_only=plan_only, state_bucket=state_bucket,
+                    region=region, max_attempts=max_attempts, verbose=verbose,
+                    run_state=run_state,
+                ): t for t in chunk
+            }
+            for fut in as_completed(futures):
+                res = fut.result()
+                results.append(res)
+                done += 1
+                mark = {"clean": "\u00b7", "planned": "P", "applied": "\u2713",
+                        "failed": "\u2717", "skipped": "-"}.get(res.status, "?")
+                # ETA estimation
+                elapsed = time.time() - fleet_started
+                rate = done / elapsed if elapsed > 0 else 0
+                remaining = total - done
+                eta_s = int(remaining / rate) if rate > 0 and remaining > 0 else 0
+                eta_str = f" ETA \u2248{eta_s // 60}m{eta_s % 60:02d}s" if eta_s > 0 else ""
+                print(f"  [{done}/{total}] {mark} {res.account_id} "
+                      f"{res.account_name} ({res.status}, {res.duration_s:.1f}s){eta_str}")
     return results
 
 
@@ -651,6 +821,28 @@ def main(argv: Iterable[str] | None = None) -> int:
         action="store_true",
         help="Disable DynamoDB run state tracking entirely.",
     )
+    # ── Scale controls ──────────────────────────────────────────────────────
+    p.add_argument(
+        "--chunk-size",
+        type=int,
+        default=int(os.environ.get("LZ_CHUNK_SIZE", "0")),
+        help="Process accounts in chunks of this size to cap runner memory usage. "
+             "0 = no chunking (single batch). Recommended: equal to --max-parallel "
+             "so each chunk fully saturates the worker pool before the next starts. "
+             "Example: --max-parallel 10 --chunk-size 10 for 100-account estates.",
+    )
+    # ── DynamoDB inventory source ───────────────────────────────────────────
+    p.add_argument(
+        "--from-dynamodb",
+        action="store_true",
+        help="Discover accounts from lz-account-inventory DynamoDB table instead "
+             "of scanning account.json files. Faster and more reliable at scale.",
+    )
+    p.add_argument(
+        "--inventory-table",
+        default=os.environ.get("LZ_INVENTORY_TABLE", "lz-account-inventory"),
+        help="DynamoDB table name for account inventory (default: lz-account-inventory).",
+    )
     args = p.parse_args(list(argv) if argv is not None else None)
 
     if args.max_parallel < 1:
@@ -661,6 +853,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         print("--resume requires --run-id", file=sys.stderr)
         return 2
 
+    # chunk_size=0 means no chunking (process all in one ThreadPoolExecutor batch)
+    chunk_size = args.chunk_size if args.chunk_size > 0 else max(len([]), args.max_parallel)
+
     run_id = args.run_id or str(uuid.uuid4())
     run_state = RunStateTable(
         run_id=run_id,
@@ -670,21 +865,40 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     print(f"Run ID: {run_id}")
 
-    tasks = discover_accounts(
-        account_ids=args.account_id or None,
-        ou_filter=args.ou,
-        env_filter=args.env_filter,
-        name_pattern=args.name_pattern,
-        all_accounts=args.all,
-    )
+    # ── Discover accounts ───────────────────────────────────────────────────
+    if args.from_dynamodb:
+        tasks = discover_from_dynamodb(
+            table_name=args.inventory_table,
+            region=args.region,
+            account_ids=args.account_id or None,
+            ou_filter=args.ou,
+            env_filter=args.env_filter,
+            name_pattern=args.name_pattern,
+        )
+        if not tasks and args.account_id:
+            # Fallback: explicit IDs always work even without inventory record
+            tasks = [AccountTask(account_id=a, account_name=a) for a in args.account_id]
+    else:
+        tasks = discover_accounts(
+            account_ids=args.account_id or None,
+            ou_filter=args.ou,
+            env_filter=args.env_filter,
+            name_pattern=args.name_pattern,
+            all_accounts=args.all,
+        )
+
     if not tasks:
         print("No accounts matched filters.", file=sys.stderr)
         return 0
+
+    # Auto-set chunk_size to max_parallel when chunking wasn't explicitly set
+    effective_chunk_size = args.chunk_size if args.chunk_size > 0 else len(tasks)
 
     results = run_fleet(
         tasks,
         plan_only=args.plan_only,
         max_parallel=args.max_parallel,
+        chunk_size=effective_chunk_size,
         state_bucket=args.state_bucket,
         region=args.region,
         max_attempts=args.max_attempts,

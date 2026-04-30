@@ -143,6 +143,74 @@ resource "aws_dynamodb_table" "deploy_run_state" {
   tags = { Name = "${local.prefix}-deploy-run-state", Purpose = "deploy-run-state" }
 }
 
+# ── Account Inventory — DynamoDB table for SFN pipeline + drift sweep ────────
+# PK=account_id (S).
+# GSI1: environment-index  → query all accounts in an environment
+# GSI2: ou-index           → query all accounts in an OU
+# GSI3: status-index       → query accounts by provisioning status (ordered by time)
+resource "aws_dynamodb_table" "account_inventory" {
+  count        = var.create_state_backend ? 1 : 0
+  name         = "${local.prefix}-account-inventory"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "account_id"
+
+  attribute {
+    name = "account_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "environment"
+    type = "S"
+  }
+
+  attribute {
+    name = "ou"
+    type = "S"
+  }
+
+  attribute {
+    name = "status"
+    type = "S"
+  }
+
+  attribute {
+    name = "last_deployed_at"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "environment-index"
+    hash_key        = "environment"
+    range_key       = "account_id"
+    projection_type = "ALL"
+  }
+
+  global_secondary_index {
+    name            = "ou-index"
+    hash_key        = "ou"
+    range_key       = "account_id"
+    projection_type = "ALL"
+  }
+
+  global_secondary_index {
+    name            = "status-index"
+    hash_key        = "status"
+    range_key       = "last_deployed_at"
+    projection_type = "ALL"
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  tags = { Name = "${local.prefix}-account-inventory", Purpose = "account-inventory" }
+}
+
 # ── State Backend — Cross-Region Replication (DR) ────────────────────────────
 # Replicates state objects to var.dr_region so the management account can
 # recover all stack state if the primary region suffers an outage.
