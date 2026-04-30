@@ -85,6 +85,87 @@ def _discover_from_dynamodb(table_name: str, region: str) -> list[dict]:
     return items
 
 
+def _discover_unbaselined(table_name: str, region: str, min_age_minutes: int = 30) -> list[dict]:
+    """
+    Find accounts that exist in AWS Organizations but have NOT completed
+    baseline in our DynamoDB inventory.
+
+    This catches the case where CT created an account but the EventBridge
+    Lambda failed (or the SFN task failed) so baseline never ran.
+
+    Only considers accounts that are ACTIVE in Orgs AND older than
+    min_age_minutes (gives CT time to finish the creation process before
+    we declare the baseline missing).
+    """
+    import datetime
+
+    orgs = boto3.client("organizations", region_name=region)
+    ddb = boto3.resource("dynamodb", region_name=region)
+    table = ddb.Table(table_name)
+
+    # --- Collect all ACTIVE accounts from AWS Organizations ---
+    org_accounts: dict[str, dict] = {}
+    paginator = orgs.get_paginator("list_accounts")
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        minutes=min_age_minutes
+    )
+    for page in paginator.paginate():
+        for acct in page["Accounts"]:
+            if acct["Status"] != "ACTIVE":
+                continue
+            joined = acct.get("JoinedTimestamp")
+            if joined and joined > cutoff:
+                # Too new — CT may still be enrolling it, skip
+                log.debug("Skipping too-new account %s (%s)", acct["Id"], acct["Name"])
+                continue
+            org_accounts[acct["Id"]] = {
+                "account_id": acct["Id"],
+                "account_name": acct["Name"],
+            }
+
+    if not org_accounts:
+        log.info("No ACTIVE accounts found in Organizations")
+        return []
+
+    log.info("Organizations has %d ACTIVE accounts (older than %dm)", len(org_accounts), min_age_minutes)
+
+    # --- Collect all account IDs that already completed baseline ---
+    baselined_ids: set[str] = set()
+    skip_statuses = {"active", "provisioned"}
+    scan_kwargs: dict = {
+        "ProjectionExpression": "account_id, #st",
+        "ExpressionAttributeNames": {"#st": "status"},
+    }
+    while True:
+        resp = table.scan(**scan_kwargs)
+        for item in resp.get("Items", []):
+            if item.get("status", "") in skip_statuses:
+                baselined_ids.add(str(item["account_id"]))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        scan_kwargs["ExclusiveStartKey"] = lek
+
+    log.info("DynamoDB has %d baselined accounts", len(baselined_ids))
+
+    # --- Accounts in Orgs but NOT in our inventory (or status != active/provisioned) ---
+    # Exclude Control Tower management/shared accounts that never need baseline
+    ct_reserved_names = {"management", "log archive", "audit", "aft-management", "log-archive"}
+    missing = []
+    for aid, info in org_accounts.items():
+        name_lower = info["account_name"].lower()
+        if any(r in name_lower for r in ct_reserved_names):
+            continue
+        if aid not in baselined_ids:
+            missing.append(info)
+
+    log.info(
+        "Found %d account(s) that need baseline (in Orgs but not yet baselined)",
+        len(missing),
+    )
+    return missing
+
+
 def _discover_from_manifest(account_ids_file: Optional[Path]) -> list[dict]:
     """
     Parse a newline-separated file of 'account_id,account_name' pairs.
@@ -247,6 +328,12 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="File with 'account_id,account_name' lines")
     src.add_argument("--from-dynamodb", action="store_true",
                      help="Discover provisioned accounts from DynamoDB inventory table")
+    src.add_argument("--reconcile", action="store_true",
+                     help=(
+                         "Find accounts in AWS Organizations that are missing baseline "
+                         "(in Orgs but not in DynamoDB with status=active/provisioned). "
+                         "Handles CT sequential creation: safe to run after any batch push."
+                     ))
 
     # Account name (only for --account-id with single account)
     p.add_argument("--account-name", default=None,
@@ -254,7 +341,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # DynamoDB options
     p.add_argument("--inventory-table", default="lz-account-inventory",
-                   help="DynamoDB table for --from-dynamodb (default: lz-account-inventory)")
+                   help="DynamoDB table for --from-dynamodb / --reconcile (default: lz-account-inventory)")
+    p.add_argument("--reconcile-min-age", type=int, default=30,
+                   help="[--reconcile] Minimum account age in minutes before it's "
+                        "considered missing baseline (default: 30, gives CT time to finish)")
 
     # Run options
     p.add_argument("--environment", default="auto",
@@ -281,6 +371,13 @@ def main() -> int:
 
     if args.from_dynamodb:
         raw_accounts = _discover_from_dynamodb(args.inventory_table, region)
+    elif args.reconcile:
+        raw_accounts = _discover_unbaselined(
+            args.inventory_table, region, min_age_minutes=args.reconcile_min_age
+        )
+        if not raw_accounts:
+            log.info("Reconcile: all accounts are baselined — nothing to do")
+            return 0
     elif args.account_ids_file:
         raw_accounts = _discover_from_manifest(args.account_ids_file)
     else:

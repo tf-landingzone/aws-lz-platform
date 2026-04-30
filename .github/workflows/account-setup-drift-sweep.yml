@@ -14,6 +14,11 @@
 name: Account Setup Drift Sweep
 
 on:
+  # ── Nightly drift check ──────────────────────────────────────────────────
+  schedule:
+    - cron: "0 2 * * *"      # 02:00 UTC every night — drift sweep
+    - cron: "30 */4 * * *"   # Every 4 hours — CT reconciliation (catches missed baselines)
+
   workflow_dispatch:  # MANUAL ONLY — schedule disabled
     inputs:
       use_sfn:
@@ -218,9 +223,70 @@ jobs:
             --subject "[LZ] Drift detected: ${DRIFTED_COUNT} account(s)" \
             --message "$DRIFT_MSG"
 
+  # ── CT Reconcile — catch accounts CT created but baseline never ran ───────
+  # Control Tower creates accounts ONE AT A TIME (sequential). If you push 10
+  # accounts, CT takes ~3.5 hours to create them all. Each fires an EventBridge
+  # event when done. If any Lambda invocation fails, that account never gets
+  # baseline. This job runs every 4 hours and fixes any gaps automatically.
+  ct-reconcile:
+    name: CT Reconcile (catch missed baselines)
+    # Run on schedule OR manual trigger; skip when it's the nightly drift sweep
+    # (schedule[0] = 02:00 drift, schedule[1] = 4-hourly reconcile)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install boto3 pyyaml
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Reconcile — find accounts missing baseline and run pipeline
+        id: reconcile
+        env:
+          SFN_PIPELINE_ARN:   ${{ secrets.SFN_PIPELINE_ARN }}
+          TF_STATE_BUCKET:    ${{ secrets.TF_STATE_BUCKET }}
+          LZ_INVENTORY_TABLE: ${{ secrets.LZ_INVENTORY_TABLE || 'lz-account-inventory' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sfn_launcher.py \
+            --state-machine-arn  "$SFN_PIPELINE_ARN" \
+            --state-bucket       "$TF_STATE_BUCKET" \
+            --reconcile \
+            --inventory-table    "$LZ_INVENTORY_TABLE" \
+            --reconcile-min-age  30 \
+            --wait
+          echo "reconcile_ran=true" >> "$GITHUB_OUTPUT"
+
+      - name: Notify on accounts recovered
+        if: steps.reconcile.outputs.reconcile_ran == 'true'
+        env:
+          TOPIC_ARN: ${{ secrets.OPS_NOTIFICATION_TOPIC_ARN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ -z "${TOPIC_ARN:-}" ]]; then exit 0; fi
+          aws sns publish \
+            --topic-arn "$TOPIC_ARN" \
+            --subject "[LZ] CT Reconcile: baseline applied to missed accounts" \
+            --message "Accounts that were created by Control Tower but had no baseline are now baselined. See: ${RUN_URL}"
+
   notify-failure:
     name: Notify on failure
-    needs: [sweep, sfn-sweep]
+    needs: [sweep, sfn-sweep, ct-reconcile]
     if: failure()
     runs-on: ubuntu-latest
     timeout-minutes: 5
