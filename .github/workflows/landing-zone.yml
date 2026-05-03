@@ -1,33 +1,7 @@
 name: Landing Zone Deploy
 
 on:
-  # ── GitOps: plan on PR, apply on merge ───────────────────────────────────
-  pull_request:
-    branches: [main]
-    paths:
-      - "config/**"
-      - "stacks/landing-zone/**"
-      - "scripts/generate_landing_zone_tfvars.py"
-      - "scripts/hcl_writer.py"
-
-  push:
-    branches: [main]
-    paths:
-      - "config/**"
-      - "stacks/landing-zone/**"
-      - "scripts/generate_landing_zone_tfvars.py"
-      - "scripts/hcl_writer.py"
-
-  # ── Weekly drift detection (Sunday 03:00 UTC) ────────────────────────────
-  schedule:
-    - cron: "0 3 * * 0"
-
-  # ── Cross-repo: triggered when aws-tf-modules or aws-lz-policies changes ─
-  repository_dispatch:
-    types: [modules-updated, policies-updated]
-
-  # ── Manual override ───────────────────────────────────────────────────────
-  workflow_dispatch:
+  workflow_dispatch:  # DISABLED — re-enable pull_request/push/schedule/repository_dispatch when ready
     inputs:
       action:
         description: "Terraform action to perform"

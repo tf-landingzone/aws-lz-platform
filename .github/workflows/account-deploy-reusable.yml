@@ -16,6 +16,7 @@
 name: Account Deploy (Reusable)
 
 on:
+  workflow_dispatch:  # DISABLED — was workflow_call (reusable); re-enable when ready
   workflow_call:
     inputs:
       account_id:

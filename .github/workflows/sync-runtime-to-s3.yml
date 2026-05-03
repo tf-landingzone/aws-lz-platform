@@ -28,17 +28,7 @@
 name: Sync Runtime to S3
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "stacks/account-setup/**"
-      - "account_policy_map.yaml"
-
-  # Triggered from aws-tf-modules and aws-lz-policies via repository_dispatch
-  repository_dispatch:
-    types: [modules-updated, policies-updated]
-
-  workflow_dispatch:
+  workflow_dispatch:  # DISABLED — re-enable push/repository_dispatch triggers when ready
     inputs:
       dry_run:
         description: "Dry run (show what would change, do not upload)"

@@ -1,23 +1,7 @@
 name: Permission Sets
 
 on:
-  # ── GitOps: plan on PR, apply on merge ───────────────────────────────────
-  pull_request:
-    branches: [main]
-    paths:
-      - "config/landing-zone.yaml"
-      - "config/02-security.yaml"
-      - "stacks/permission-sets/**"
-
-  push:
-    branches: [main]
-    paths:
-      - "config/landing-zone.yaml"
-      - "config/02-security.yaml"
-      - "stacks/permission-sets/**"
-
-  # ── Manual override ───────────────────────────────────────────────────────
-  workflow_dispatch:
+  workflow_dispatch:  # DISABLED — re-enable pull_request/push triggers when ready
 
 concurrency:
   group: permission-sets

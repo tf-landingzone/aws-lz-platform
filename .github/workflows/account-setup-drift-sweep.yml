@@ -14,12 +14,7 @@
 name: Account Setup Drift Sweep
 
 on:
-  # ── Nightly drift check ──────────────────────────────────────────────────
-  schedule:
-    - cron: "0 2 * * *"      # 02:00 UTC every night — drift sweep
-    - cron: "30 */4 * * *"   # Every 4 hours — CT reconciliation (catches missed baselines)
-
-  workflow_dispatch:  # MANUAL ONLY — schedule disabled
+  workflow_dispatch:  # DISABLED — re-enable schedule when ready
     inputs:
       use_sfn:
         description: "Route through SFN+Fargate pipeline (enterprise mode — set SFN_PIPELINE_ARN secret)"

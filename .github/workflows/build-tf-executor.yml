@@ -28,15 +28,7 @@
 name: Build tf-executor Image
 
 on:
-  push:
-    branches: [main]
-    paths:
-      # ONLY rebuild when the actual runtime changes.
-      # Code changes (TF files, modules, policies, scripts) are handled
-      # by sync-runtime-to-s3.yml — no image rebuild required.
-      - "docker/tf-executor/**"
-
-  workflow_dispatch:
+  workflow_dispatch:  # DISABLED — re-enable push trigger when ready
     inputs:
       push_image:
         description: "Push image to ECR after build"
